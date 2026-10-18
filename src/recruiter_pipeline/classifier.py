@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from recruiter_pipeline.llm import LLMClient
-from recruiter_pipeline.models import Classification, LinkedInMessage
+from recruiter_pipeline.models import Classification, RecruiterMessage
 
 PROMPT_PATH = Path(__file__).resolve().parent.parent.parent / "prompts" / "classify.txt"
 
@@ -15,7 +15,7 @@ class Classifier:
         self.llm = llm or LLMClient()
         self.system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
 
-    def classify(self, message: LinkedInMessage) -> Classification:
+    def classify(self, message: RecruiterMessage) -> Classification:
         """Classifica a mensagem como proposta de emprego ou não."""
         user_prompt = self._build_prompt(message)
         return self.llm.complete(
@@ -24,7 +24,7 @@ class Classifier:
             response_model=Classification,
         )
 
-    def _build_prompt(self, message: LinkedInMessage) -> str:
+    def _build_prompt(self, message: RecruiterMessage) -> str:
         parts = [
             f"Assunto: {message.subject}",
             f"Remetente: {message.sender_name}",

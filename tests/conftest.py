@@ -1,10 +1,8 @@
 """Fixtures e helpers para testes."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-import pytest
-
-from recruiter_pipeline.models import LinkedInMessage
+from recruiter_pipeline.models import RecruiterMessage
 
 
 def make_message(
@@ -12,9 +10,9 @@ def make_message(
     sender_name: str = "João Silva",
     sender_headline: str = "Recruiter at Michael Page",
     subject: str = "João Silva sent you a message",
-) -> LinkedInMessage:
-    """Cria uma LinkedInMessage de teste."""
-    return LinkedInMessage(
+) -> RecruiterMessage:
+    """Cria uma RecruiterMessage de teste."""
+    return RecruiterMessage(
         message_id="test-message-id",
         thread_id="test-thread-id",
         sender_name=sender_name,
@@ -22,6 +20,6 @@ def make_message(
         subject=subject,
         body_text=body,
         body_html=None,
-        received_at=datetime(2025, 6, 15, 10, 0, 0, tzinfo=timezone.utc),
+        received_at=datetime(2025, 6, 15, 10, 0, 0, tzinfo=UTC),
         permalink="https://www.linkedin.com/messaging/thread/123/",
     )

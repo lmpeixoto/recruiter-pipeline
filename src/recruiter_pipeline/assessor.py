@@ -7,9 +7,9 @@ from recruiter_pipeline.config import Config
 from recruiter_pipeline.llm import LLMClient
 from recruiter_pipeline.models import (
     CompanyEnrichment,
-    LinkedInMessage,
     OpportunityAssessment,
     ProposalExtraction,
+    RecruiterMessage,
 )
 
 PROMPT_PATH = Path(__file__).resolve().parent.parent.parent / "prompts" / "assess.txt"
@@ -42,7 +42,7 @@ class Assessor:
 
     def assess(
         self,
-        message: LinkedInMessage,
+        message: RecruiterMessage,
         extraction: ProposalExtraction,
         enrichment: CompanyEnrichment | None,
     ) -> OpportunityAssessment | None:

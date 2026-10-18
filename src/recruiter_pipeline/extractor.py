@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from recruiter_pipeline.llm import LLMClient
-from recruiter_pipeline.models import LinkedInMessage, ProposalExtraction
+from recruiter_pipeline.models import ProposalExtraction, RecruiterMessage
 
 PROMPT_PATH = Path(__file__).resolve().parent.parent.parent / "prompts" / "extract.txt"
 
@@ -15,7 +15,7 @@ class Extractor:
         self.llm = llm or LLMClient()
         self.system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
 
-    def extract(self, message: LinkedInMessage) -> ProposalExtraction:
+    def extract(self, message: RecruiterMessage) -> ProposalExtraction:
         """Extrai os campos estruturados da proposta."""
         user_prompt = self._build_prompt(message)
         extraction = self.llm.complete(
@@ -43,7 +43,7 @@ class Extractor:
                 setattr(extraction, field, None)
         return extraction
 
-    def _build_prompt(self, message: LinkedInMessage) -> str:
+    def _build_prompt(self, message: RecruiterMessage) -> str:
         parts = [
             f"Assunto: {message.subject}",
             f"Remetente: {message.sender_name}",

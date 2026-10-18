@@ -1,14 +1,14 @@
 """Testes para avaliação de oportunidades e helpers do modelo."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from recruiter_pipeline.db import StateDB
 from recruiter_pipeline.models import (
     Classification,
-    LinkedInMessage,
     OpportunityAssessment,
     Proposal,
     ProposalExtraction,
+    RecruiterMessage,
     _normalize,
     missing_information,
     opportunities_match,
@@ -49,12 +49,12 @@ class TestNormalize:
 
 
 def _make_proposal(company: str, role: str) -> Proposal:
-    msg = LinkedInMessage(
+    msg = RecruiterMessage(
         message_id="m1",
         sender_name="R",
         subject="s",
         body_text="b",
-        received_at=datetime.now(timezone.utc),
+        received_at=datetime.now(UTC),
     )
     return Proposal(
         message=msg,
