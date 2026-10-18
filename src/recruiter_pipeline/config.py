@@ -24,11 +24,12 @@ class Config:
     openrouter_model: str = os.getenv(
         "OPENROUTER_MODEL", "openai/gpt-4o-mini"
     )
-    # Modelo opcional para os passos de decisão tipada (Classifier, Assessor) --
-    # ex. "typesafe/jev-1.14" via OpenRouter. Vazio por omissão: esses passos
-    # continuam a usar openrouter_model como qualquer outro. A extração
-    # (Extractor) nunca usa este modelo -- tem campos de texto livre
-    # (nomes, resumo) que um modelo de decisão tipada não é feito para gerar.
+    # Modelo opcional de decisões tipadas (Classifier, Assessor) -- ex.
+    # "typesafe/jev-1.13" via OpenRouter. Vazio por omissão: Classifier usa
+    # openrouter_model (LLM normal) e Assessor nunca chama o Jev. Quando
+    # definido, chama /api/alpha/decisions (ver jev_client.py) -- NÃO é um
+    # model= normal de chat/completions. A extração (Extractor) nunca usa
+    # isto -- tem campos de texto livre que um decisions model não gera.
     jev_model: str = os.getenv("JEV_MODEL", "")
 
     notion_token: str = os.getenv("NOTION_TOKEN", "")

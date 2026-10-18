@@ -74,12 +74,17 @@ OPENROUTER_API_KEY=sk-or-v1-...
 # Modelo sugerido: openai/gpt-4o-mini (barato, bom structured output)
 # Vê outros em https://openrouter.ai/models
 OPENROUTER_MODEL=openai/gpt-4o-mini
-# Opcional: modelo separado só para Classifier e Assessor -- ambos são
-# decisões tipadas (bool/scores/ação de conjunto fechado), candidatos
-# naturais a um "System One" model como o typesafe/jev-1.14 (via
-# OpenRouter). O Extractor nunca usa isto -- tem campos de texto livre
-# (nomes, resumo) que esse tipo de modelo não gera. Vazio = usa
-# OPENROUTER_MODEL como os outros passos, sem mudança de comportamento.
+# Opcional: liga o Jev (System One decisions model, via OpenRouter) para
+# as decisões fechadas do pipeline:
+#   - Classifier.is_opportunity -- uma pergunta Noul, substitui o LLM
+#     generativo inteiro nesse passo (sem chamada ao OPENROUTER_MODEL).
+#   - Assessor.opportunity_type / recommended_action -- duas perguntas
+#     Choice, cujo resultado substitui o do LLM só nesses dois campos.
+# O resto (extração de texto, scores 0-100, action_reason, questions_to_ask)
+# fica sempre no LLM generativo -- o Jev não gera texto livre nem um score
+# contínuo. Chama /api/alpha/decisions, NÃO /chat/completions (ver
+# src/recruiter_pipeline/jev_client.py). Vazio = tudo no LLM normal, como
+# antes. Valor: um ID de modelo Jev (ex. typesafe/jev-1.13).
 JEV_MODEL=
 NOTION_TOKEN=secret_...
 NOTION_PARENT_PAGE_ID=...
