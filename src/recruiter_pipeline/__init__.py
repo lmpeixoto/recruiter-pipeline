@@ -1,0 +1,1 @@
+"""Pipeline de propostas de recruiters do LinkedIn."""
