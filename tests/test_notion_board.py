@@ -205,3 +205,16 @@ class TestCardContent:
         assert "Rascunho de resposta" in text
         assert "provisório" in text
         assert "jev:" not in text  # o rasto de debug nunca vai para o card
+
+
+class TestChunkText:
+    def test_chunks_respect_notion_utf16_limit(self):
+        text = "😀" * 1500 + "a" * 500
+        chunks = NotionBoard._chunk_text(text)
+        assert "".join(chunks) == text
+        for chunk in chunks:
+            assert len(chunk.encode("utf-16-le")) // 2 <= 2000
+
+    def test_plain_text_and_empty(self):
+        assert NotionBoard._chunk_text("") == [""]
+        assert NotionBoard._chunk_text("a" * 3000) == ["a" * 1990, "a" * 1010]
