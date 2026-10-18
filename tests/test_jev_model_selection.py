@@ -74,11 +74,21 @@ class TestClassifierJev:
         assert not classifier.using_jev
         assert classifier.llm is not None
 
-    def test_explicit_llm_override_wins_over_config(self, monkeypatch):
-        monkeypatch.setattr(Config, "jev_model", "typesafe/jev-1.13")
+    def test_explicit_llm_used_for_generative_path_when_jev_unset(self, monkeypatch):
+        monkeypatch.setattr(Config, "jev_model", "")
         fake_llm = FakeLLM()
         classifier = Classifier(llm=fake_llm)
         assert not classifier.using_jev
+        assert classifier.llm is fake_llm
+
+    def test_explicit_llm_does_not_disable_configured_jev(self, monkeypatch):
+        # llm partilhado (p.ex. para agregar call_count no run inteiro) e jev
+        # são independentes -- só o jev/Config.jev_model decide se o Jev liga.
+        monkeypatch.setattr(Config, "jev_model", "typesafe/jev-1.13")
+        monkeypatch.setattr(Config, "openrouter_api_key", "test-key")
+        fake_llm = FakeLLM()
+        classifier = Classifier(llm=fake_llm)
+        assert classifier.using_jev
         assert classifier.llm is fake_llm
 
 
@@ -131,6 +141,53 @@ class TestAssessorJev:
         result = assessor.assess(_message(), _extraction(), None)
 
         assert result.action_reason == "bom fit"
+
+    def test_low_confidence_jev_choice_keeps_llm_result(self):
+        """Confidence < 0.5 no Choice do Jev -- fica a escolha do LLM."""
+        jev = FakeJev(
+            {
+                "opportunity_type": {
+                    "type": "choice",
+                    "choice": "generic",
+                    "confidence": 0.2,
+                },
+                "recommended_action": {
+                    "type": "choice",
+                    "choice": "ignore",
+                    "confidence": 0.3,
+                },
+            }
+        )
+        llm_result = OpportunityAssessment(
+            opportunity_type="job_opportunity",
+            recommended_action="apply",
+            action_reason="bom fit",
+        )
+        assessor = self._assessor(jev=jev, llm_result=llm_result)
+
+        result = assessor.assess(_message(), _extraction(), None)
+
+        assert result.opportunity_type == "job_opportunity"
+        assert result.recommended_action == "apply"
+        assert result.action_reason == "bom fit"
+
+    def test_missing_confidence_still_overrides(self):
+        """Confidence ausente (opcional na API) -- confia e substitui."""
+        jev = FakeJev(
+            {
+                "opportunity_type": {"type": "choice", "choice": "job_opportunity"},
+                "recommended_action": {"type": "choice", "choice": "apply"},
+            }
+        )
+        llm_result = OpportunityAssessment(
+            opportunity_type="unknown", recommended_action="monitor"
+        )
+        assessor = self._assessor(jev=jev, llm_result=llm_result)
+
+        result = assessor.assess(_message(), _extraction(), None)
+
+        assert result.opportunity_type == "job_opportunity"
+        assert result.recommended_action == "apply"
 
     def test_no_jev_keeps_llm_result_unchanged(self):
         llm_result = OpportunityAssessment(

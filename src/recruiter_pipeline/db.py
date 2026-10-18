@@ -161,6 +161,14 @@ class StateDB:
         if page_id:
             return page_id, fingerprint
 
+        # Nunca fazer fuzzy match sem evidência mínima de identidade -- duas
+        # propostas com empresa/role desconhecidos não são "a mesma vaga",
+        # são ambas "sem dados". Sem esta guarda, "unknown"::"unknown" faz
+        # Jaccard=1.0 contra qualquer outra proposta igualmente sem dados e
+        # fica à mercê da ordem de leitura da tabela.
+        if company == "unknown" or not role_title:
+            return None, fingerprint
+
         # Segunda camada: fuzzy match contra propostas existentes
         with self._connect() as conn:
             rows = conn.execute(
@@ -171,7 +179,7 @@ class StateDB:
                 other_company = row["company_client"] or row["agency"] or "unknown"
                 if opportunities_match(
                     company,
-                    role_title or "unknown",
+                    role_title,
                     location,
                     contract_type,
                     other_company,
@@ -179,9 +187,15 @@ class StateDB:
                     row["location"],
                     row["contract_type"],
                 ):
-                    # Migra o fingerprint da proposta antiga para o novo formato
+                    # Migra o fingerprint da proposta antiga para o novo formato --
+                    # proposal_sources usa o mesmo fingerprint como parte da chave,
+                    # tem de migrar na mesma transação ou a proveniência fica órfã.
                     conn.execute(
                         "UPDATE proposals SET fingerprint = ? WHERE fingerprint = ?",
+                        (fingerprint, row["fingerprint"]),
+                    )
+                    conn.execute(
+                        "UPDATE proposal_sources SET fingerprint = ? WHERE fingerprint = ?",
                         (fingerprint, row["fingerprint"]),
                     )
                     return row["notion_page_id"], fingerprint
