@@ -113,8 +113,17 @@ class Assessor:
                 ),
             },
         )
+        jev_action = answers["recommended_action"]["choice"]
+        if jev_action != assessment.recommended_action:
+            # O action_reason do LLM foi escrito a justificar a ação original --
+            # sem esta nota, o card no Notion mostra a ação do Jev ao lado de uma
+            # justificação que pode argumentar o contrário.
+            assessment.action_reason = (
+                f"[Jev mudou a ação de '{assessment.recommended_action}' para "
+                f"'{jev_action}'] {assessment.action_reason}"
+            ).strip()
         assessment.opportunity_type = answers["opportunity_type"]["choice"]
-        assessment.recommended_action = answers["recommended_action"]["choice"]
+        assessment.recommended_action = jev_action
 
     def _build_prompt(
         self,

@@ -74,6 +74,15 @@ class TestDecide:
         with pytest.raises(JevError):
             client.decide(state={}, questions={})
 
+    def test_network_error_raises_jev_error(self, monkeypatch):
+        def fake_post(*a, **k):
+            raise httpx.ConnectError("boom")
+
+        monkeypatch.setattr(httpx, "post", fake_post)
+        client = JevClient(api_key="k")
+        with pytest.raises(JevError):
+            client.decide(state={}, questions={})
+
 
 class TestQuestionBuilders:
     def test_noul_shape(self):

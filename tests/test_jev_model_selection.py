@@ -111,8 +111,26 @@ class TestAssessorJev:
         assert result.recommended_action == "apply"
         # Campos de texto/score vêm do LLM, intocados pelo Jev.
         assert result.fit_score == 80
-        assert result.action_reason == "bom fit"
+        # Jev mudou monitor->apply: a nota do override fica à frente do
+        # action_reason original, para não contradizer silenciosamente.
+        assert result.action_reason == "[Jev mudou a ação de 'monitor' para 'apply'] bom fit"
         assert len(jev.calls) == 1
+
+    def test_jev_same_action_leaves_reason_unchanged(self):
+        jev = FakeJev(
+            {
+                "opportunity_type": {"type": "choice", "choice": "job_opportunity"},
+                "recommended_action": {"type": "choice", "choice": "monitor"},
+            }
+        )
+        llm_result = OpportunityAssessment(
+            recommended_action="monitor", action_reason="bom fit"
+        )
+        assessor = self._assessor(jev=jev, llm_result=llm_result)
+
+        result = assessor.assess(_message(), _extraction(), None)
+
+        assert result.action_reason == "bom fit"
 
     def test_no_jev_keeps_llm_result_unchanged(self):
         llm_result = OpportunityAssessment(

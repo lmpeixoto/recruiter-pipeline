@@ -53,15 +53,18 @@ class JevClient:
         Acumula custo/contagem em self.total_cost/self.call_count para
         permitir reportar a eficiência do modelo no fim de um run.
         """
-        response = httpx.post(
-            DECISIONS_URL,
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            json={"model": self.model, "state": state, "questions": questions},
-            timeout=self.timeout,
-        )
+        try:
+            response = httpx.post(
+                DECISIONS_URL,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={"model": self.model, "state": state, "questions": questions},
+                timeout=self.timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise JevError(f"Falha de rede a chamar /api/alpha/decisions: {exc}") from exc
         if response.status_code != 200:
             raise JevError(
                 f"/api/alpha/decisions devolveu {response.status_code}: "
