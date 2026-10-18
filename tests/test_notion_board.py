@@ -4,8 +4,8 @@ from datetime import UTC, datetime
 
 from recruiter_pipeline.models import (
     CompanyEnrichment,
-    LinkedInMessage,
     ProposalExtraction,
+    RecruiterMessage,
 )
 from recruiter_pipeline.notion_board import NotionBoard
 
@@ -17,7 +17,7 @@ def _extraction(agency=None, company_client=None):
 
 
 def _message():
-    return LinkedInMessage(
+    return RecruiterMessage(
         message_id="m1",
         sender_name="R",
         subject="s",
