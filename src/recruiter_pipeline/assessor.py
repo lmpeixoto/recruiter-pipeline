@@ -23,7 +23,11 @@ class Assessor:
         llm: LLMClient | None = None,
         profile: str | None = None,
     ) -> None:
-        self.llm = llm or LLMClient()
+        # Os scores 0-100 + a ação de conjunto fechado são decisão tipada --
+        # mesma lógica do Classifier: usa JEV_MODEL quando definido.
+        # action_reason/questions_to_ask ficam texto livre de qualquer forma,
+        # o modelo escolhido devolve-os como string normal dentro do JSON.
+        self.llm = llm or LLMClient(model=Config.jev_model or None)
         self.system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
         if profile is None:
             profile = self._load_profile()
