@@ -125,3 +125,34 @@ def test_job_alert_becomes_one_proposal_per_job(monkeypatch, tmp_path):
     # backup criado antes de escrever
     assert list(tmp_path.glob("state.db.bak-*"))
     assert "Propostas encontradas" in result.output
+
+
+class _NoCreditExtractor:
+    def __init__(self, *a, **k):
+        pass
+
+    def extract(self, message):
+        err = RuntimeError("Error code: 402 - requires more credits")
+        err.status_code = 402
+        raise err
+
+
+def test_fatal_api_error_aborts_run_without_checkpoint(monkeypatch, tmp_path):
+    monkeypatch.setattr(Config, "state_db_path", tmp_path / "state.db")
+    monkeypatch.setattr(Config, "validate", classmethod(lambda cls: None))
+    monkeypatch.setattr(Config, "openrouter_api_key", "k")
+    monkeypatch.setattr(main_module, "GmailClient", FakeGmail)
+    monkeypatch.setattr(main_module, "Classifier", ExplodingClassifier)
+    monkeypatch.setattr(main_module, "Extractor", _NoCreditExtractor)
+    monkeypatch.setattr(main_module, "Assessor", FakeAssessor)
+    monkeypatch.setattr(main_module, "NotionBoard", FakeBoard)
+    monkeypatch.setattr(main_module, "LLMClient", lambda *a, **k: type("L", (), {"call_count": 0, "total_tokens": 0})())
+
+    result = runner.invoke(main_module.app, ["run", "--skip-enrichment"])
+
+    assert result.exit_code == 1
+    assert "A parar o run" in result.output
+    db = StateDB(db_path=tmp_path / "state.db")
+    assert db.get_last_run_at() is None  # checkpoint não avança
+    assert not db.is_email_processed("alert-1#job4012345678")
+    assert result.output.count("Erro a processar") == 1  # parou à primeira

@@ -21,7 +21,7 @@ from recruiter_pipeline.extractor import Extractor
 from recruiter_pipeline.gmail_client import GmailClient, is_notification_email
 from recruiter_pipeline.job_alerts import fetch_job_description, split_job_alert
 from recruiter_pipeline.jev_client import JevClient
-from recruiter_pipeline.llm import LLMClient
+from recruiter_pipeline.llm import LLMClient, is_fatal_api_error
 from recruiter_pipeline.models import Classification, Proposal, RecruiterMessage
 from recruiter_pipeline.notion_board import NotionBoard
 
@@ -315,6 +315,7 @@ def run(
     proposals: list[Proposal] = []
     skipped = 0
     errors = 0
+    aborted = False
 
     for message in messages:
         if not reprocess and state_db.is_email_processed(message.message_id):
@@ -451,6 +452,14 @@ def run(
         except Exception as exc:
             console.print(f"  [red]✗ Erro a processar {message.message_id}: {exc}[/red]")
             errors += 1
+            if is_fatal_api_error(exc):
+                console.print(
+                    "[bold red]Erro de API que se repetiria em todas as mensagens "
+                    "(sem crédito ou chave inválida). A parar o run; o que falhou "
+                    "será repetido no próximo.[/bold red]"
+                )
+                aborted = True
+                break
 
     _print_summary(proposals, skipped, errors, dry_run)
     console.print(
@@ -466,7 +475,7 @@ def run(
         console.print(f"[bold]{title}[/bold]\n{body}")
         if notify_done and not dry_run and not notify(title, body):
             console.print("[yellow]Não consegui enviar a notificação macOS.[/yellow]")
-    if not dry_run:
+    if not dry_run and not aborted:
         # dry-run não avança o checkpoint de --since-last-run nem grava no
         # histórico de runs -- é só uma pré-visualização.
         state_db.record_run(
@@ -474,6 +483,8 @@ def run(
             proposals_created=len(proposals),
             errors=errors,
         )
+    if aborted:
+        raise typer.Exit(1)
 
 
 @app.command()
