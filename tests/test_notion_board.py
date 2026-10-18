@@ -1,12 +1,28 @@
 """Testes para helpers do NotionBoard (sem chamadas à API)."""
 
-from recruiter_pipeline.models import CompanyEnrichment, ProposalExtraction
+from datetime import UTC, datetime
+
+from recruiter_pipeline.models import (
+    CompanyEnrichment,
+    LinkedInMessage,
+    ProposalExtraction,
+)
 from recruiter_pipeline.notion_board import NotionBoard
 
 
 def _extraction(agency=None, company_client=None):
     return ProposalExtraction(
         agency=agency, company_client=company_client, summary="s", confidence=0.9
+    )
+
+
+def _message():
+    return LinkedInMessage(
+        message_id="m1",
+        sender_name="R",
+        subject="s",
+        body_text="b",
+        received_at=datetime.now(UTC),
     )
 
 
@@ -80,3 +96,21 @@ class TestEnrichmentBlocks:
         e = CompanyEnrichment(name="Acme")
         blocks = board._enrichment_blocks(e)
         assert blocks[0]["type"] == "heading_2"
+
+
+class TestEstadoNotStompedOnUpdate:
+    """Regressão: _build_properties nunca inclui "Estado" -- só upsert_proposal
+    o define, e só no ramo de criação. Sem isto, qualquer update (reprocessar
+    um email, ou um fuzzy-match numa proposta já existente) repunha "Nova"
+    por cima de um estágio que o humano já tinha avançado à mão no Notion
+    (ex.: "Entrevista", "Proposta")."""
+
+    def test_build_properties_never_sets_estado(self):
+        board = NotionBoard.__new__(NotionBoard)
+        properties = board._build_properties(
+            extraction=_extraction(company_client="Acme"),
+            message=_message(),
+            enrichment=None,
+        )
+        assert "Estado" not in properties
+

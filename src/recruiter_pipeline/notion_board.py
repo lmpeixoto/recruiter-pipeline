@@ -236,6 +236,11 @@ class NotionBoard:
                 existing_page_id = None
 
         if not existing_page_id:
+            # "Estado" só é definido na criação -- um update nunca o toca, para
+            # não repor "Nova" por cima de um estágio que o humano já avançou
+            # manualmente no Notion (bug real: todo upsert definia sempre
+            # "Nova", incluindo updates de propostas já em "Entrevista" etc.).
+            properties["Estado"] = {"select": {"name": "Nova"}}
             page = self.client.pages.create(
                 parent={"database_id": database_id},
                 properties=properties,
@@ -445,7 +450,6 @@ class NotionBoard:
             "Remote": {"select": {"name": extraction.remote_policy or ""}},
             "Salario": {"rich_text": [{"text": {"content": extraction.salary or ""}}]},
             "Contrato": {"select": {"name": extraction.contract_type or ""}},
-            "Estado": {"select": {"name": "Nova"}},
             "Confianca": {"select": {"name": confianca}},
             "Fonte": {"select": {"name": message.source}},
             "Recebida": {"date": {"start": message.received_at.date().isoformat()}},
