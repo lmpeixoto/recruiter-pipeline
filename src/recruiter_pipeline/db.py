@@ -1,12 +1,23 @@
 """Estado local em SQLite: dedupe, cache de empresas e emails processados."""
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 from recruiter_pipeline.config import Config
-from recruiter_pipeline.models import _normalize, opportunities_match
+from recruiter_pipeline.models import (
+    Classification,
+    OpportunityAssessment,
+    ProposalExtraction,
+    RecruiterMessage,
+    _normalize,
+    locations_compatible,
+    missing_information,
+    opportunities_match,
+    roles_similar,
+)
 
 
 class StateDB:
@@ -84,6 +95,34 @@ class StateDB:
                     received_at TEXT,
                     PRIMARY KEY (name, message_id)
                 );
+
+                -- O que o pipeline decidiu e porquê, por mensagem. Sem isto não
+                -- há forma de auditar a taxa de "ignore" nem comparar Jev vs LLM.
+                CREATE TABLE IF NOT EXISTS assessments (
+                    message_id TEXT PRIMARY KEY,
+                    fingerprint TEXT,
+                    created_at TEXT NOT NULL,
+                    email_type TEXT,
+                    source TEXT,
+                    company TEXT,
+                    agency TEXT,
+                    role_title TEXT,
+                    seniority TEXT,
+                    remote_policy TEXT,
+                    salary TEXT,
+                    stack TEXT,
+                    missing_count INTEGER,
+                    classification_confidence REAL,
+                    classification_reason TEXT,
+                    extraction_confidence REAL,
+                    opportunity_type TEXT,
+                    fit_score INTEGER,
+                    fit_confidence INTEGER,
+                    action TEXT,
+                    action_source TEXT,
+                    jev_confidence REAL,
+                    decision_trace TEXT
+                );
                 """
             )
             # Migração incremental de colunas (ignora se já existirem)
@@ -95,6 +134,8 @@ class StateDB:
                 "ALTER TABLE proposals ADD COLUMN source_message_id TEXT",
                 "ALTER TABLE proposals ADD COLUMN source_url TEXT",
                 "ALTER TABLE proposals ADD COLUMN source_received_at TEXT",
+                "ALTER TABLE proposals ADD COLUMN job_id TEXT",
+                "ALTER TABLE proposals ADD COLUMN recruiter_name TEXT",
             ):
                 try:
                     conn.execute(stmt)
@@ -142,11 +183,16 @@ class StateDB:
         role_title: str | None,
         location: str | None,
         contract_type: str | None,
+        recruiter_name: str | None = None,
+        job_id: str | None = None,
     ) -> tuple[str | None, str]:
-        """Encontra uma proposta existente por fingerprint exato ou fuzzy match.
+        """Encontra uma proposta existente (id da vaga, fingerprint ou fuzzy).
 
-        Devolve (notion_page_id, fingerprint_a_usar). Se der fuzzy match numa
-        proposta antiga, migra o fingerprint dela para o novo formato.
+        Devolve (notion_page_id, fingerprint_a_usar). Camadas, da mais para a
+        menos fiável: id da vaga do LinkedIn; fingerprint exato; fuzzy por
+        empresa (cliente OU agência) + role; fuzzy por recruiter + role quando
+        a empresa é desconhecida. Num fuzzy match o fingerprint antigo migra
+        para o novo formato.
         """
         company = company_client or agency or "unknown"
         fingerprint = "::".join(
@@ -157,47 +203,78 @@ class StateDB:
                 _normalize(contract_type or ""),
             ]
         )
+
+        # 1) Mesma vaga do LinkedIn (vem em job alerts e links de DM)
+        if job_id:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT fingerprint, notion_page_id FROM proposals WHERE job_id = ?",
+                    (job_id,),
+                ).fetchone()
+            if row:
+                return row["notion_page_id"], row["fingerprint"]
+
+        # 2) Fingerprint exato
         page_id = self.get_proposal_page_id(fingerprint)
         if page_id:
             return page_id, fingerprint
 
-        # Nunca fazer fuzzy match sem evidência mínima de identidade -- duas
-        # propostas com empresa/role desconhecidos não são "a mesma vaga",
-        # são ambas "sem dados". Sem esta guarda, "unknown"::"unknown" faz
-        # Jaccard=1.0 contra qualquer outra proposta igualmente sem dados e
-        # fica à mercê da ordem de leitura da tabela.
-        if company == "unknown" or not role_title:
+        # Nunca fazer fuzzy match sem role: sem identidade mínima duas
+        # propostas "sem dados" não são "a mesma vaga" (Jaccard de vazios).
+        if not role_title:
             return None, fingerprint
 
-        # Segunda camada: fuzzy match contra propostas existentes
+        names = [n for n in (company_client, agency) if n]
+        recruiter_key = _normalize(recruiter_name or "")
+
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT fingerprint, notion_page_id, company_client, agency, "
-                "role_title, location, contract_type FROM proposals"
+                "role_title, location, contract_type, recruiter_name FROM proposals"
             ).fetchall()
             for row in rows:
-                other_company = row["company_client"] or row["agency"] or "unknown"
-                if opportunities_match(
-                    company,
-                    role_title,
-                    location,
-                    contract_type,
-                    other_company,
-                    row["role_title"] or "unknown",
-                    row["location"],
-                    row["contract_type"],
-                ):
-                    # Migra o fingerprint da proposta antiga para o novo formato --
-                    # proposal_sources usa o mesmo fingerprint como parte da chave,
-                    # tem de migrar na mesma transação ou a proveniência fica órfã.
-                    conn.execute(
-                        "UPDATE proposals SET fingerprint = ? WHERE fingerprint = ?",
-                        (fingerprint, row["fingerprint"]),
+                if not row["role_title"]:
+                    continue
+                other_names = [n for n in (row["company_client"], row["agency"]) if n]
+                matched = False
+                if names and other_names:
+                    # Cliente num email e agência noutro é a mesma vaga
+                    matched = any(
+                        opportunities_match(
+                            name, role_title, location, contract_type,
+                            other, row["role_title"], row["location"], row["contract_type"],
+                        )
+                        for name in names
+                        for other in other_names
                     )
-                    conn.execute(
-                        "UPDATE proposal_sources SET fingerprint = ? WHERE fingerprint = ?",
-                        (fingerprint, row["fingerprint"]),
+                elif recruiter_key and recruiter_key == _normalize(row["recruiter_name"] or ""):
+                    # Empresa desconhecida de um dos lados: o mesmo recruiter a
+                    # enviar o mesmo role é a melhor evidência disponível.
+                    matched = (
+                        roles_similar(role_title, row["role_title"])
+                        and locations_compatible(location, row["location"])
+                        and (
+                            not contract_type
+                            or not row["contract_type"]
+                            or _normalize(contract_type) == _normalize(row["contract_type"])
+                        )
                     )
+                if matched:
+                    # proposal_sources usa o fingerprint na chave -- migrar na
+                    # mesma transação ou a proveniência fica órfã.
+                    if row["fingerprint"] != fingerprint:
+                        conn.execute(
+                            "UPDATE proposals SET fingerprint = ? WHERE fingerprint = ?",
+                            (fingerprint, row["fingerprint"]),
+                        )
+                        conn.execute(
+                            "UPDATE proposal_sources SET fingerprint = ? WHERE fingerprint = ?",
+                            (fingerprint, row["fingerprint"]),
+                        )
+                        conn.execute(
+                            "UPDATE assessments SET fingerprint = ? WHERE fingerprint = ?",
+                            (fingerprint, row["fingerprint"]),
+                        )
                     return row["notion_page_id"], fingerprint
         return None, fingerprint
 
@@ -214,6 +291,8 @@ class StateDB:
         source_message_id: str | None = None,
         source_url: str | None = None,
         source_received_at: str | None = None,
+        job_id: str | None = None,
+        recruiter_name: str | None = None,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
@@ -222,8 +301,8 @@ class StateDB:
                 INSERT INTO proposals
                 (fingerprint, notion_page_id, company_client, agency, role_title,
                  location, contract_type, source, source_message_id, source_url,
-                 source_received_at, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 source_received_at, job_id, recruiter_name, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(fingerprint) DO UPDATE SET
                     notion_page_id = excluded.notion_page_id,
                     company_client = excluded.company_client,
@@ -235,6 +314,8 @@ class StateDB:
                     source_message_id = excluded.source_message_id,
                     source_url = excluded.source_url,
                     source_received_at = excluded.source_received_at,
+                    job_id = COALESCE(excluded.job_id, proposals.job_id),
+                    recruiter_name = COALESCE(excluded.recruiter_name, proposals.recruiter_name),
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -249,6 +330,8 @@ class StateDB:
                     source_message_id,
                     source_url,
                     source_received_at,
+                    job_id,
+                    recruiter_name,
                     now,
                     now,
                 ),
@@ -379,3 +462,179 @@ class StateDB:
                     errors,
                 ),
             )
+
+    # --- avaliações (auditoria das decisões) ---------------------------------
+
+    def record_assessment(
+        self,
+        message: RecruiterMessage,
+        fingerprint: str,
+        classification: Classification,
+        extraction: ProposalExtraction,
+        assessment: OpportunityAssessment | None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO assessments
+                (message_id, fingerprint, created_at, email_type, source, company,
+                 agency, role_title, seniority, remote_policy, salary, stack,
+                 missing_count, classification_confidence, classification_reason,
+                 extraction_confidence, opportunity_type, fit_score, fit_confidence,
+                 action, action_source, jev_confidence, decision_trace)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    message.message_id,
+                    fingerprint,
+                    datetime.now(timezone.utc).isoformat(),
+                    message.email_type,
+                    message.source,
+                    extraction.company_client,
+                    extraction.agency,
+                    extraction.role_title,
+                    extraction.seniority,
+                    extraction.remote_policy,
+                    extraction.salary,
+                    json.dumps(extraction.stack, ensure_ascii=False),
+                    len(missing_information(extraction)),
+                    classification.confidence,
+                    classification.reason,
+                    extraction.confidence,
+                    assessment.opportunity_type if assessment else None,
+                    assessment.fit_score if assessment else None,
+                    assessment.fit_confidence if assessment else None,
+                    assessment.recommended_action if assessment else None,
+                    assessment.action_source if assessment else None,
+                    assessment.jev_confidence if assessment else None,
+                    assessment.decision_trace if assessment else None,
+                ),
+            )
+
+    def list_assessments(self) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM assessments ORDER BY created_at DESC"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    # --- manutenção ----------------------------------------------------------
+
+    def backup(self, dest: Path | None = None) -> Path:
+        """Cópia consistente da DB (API de backup do SQLite) antes de operações destrutivas."""
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        dest = dest or self.db_path.with_name(f"{self.db_path.name}.bak-{stamp}")
+        src = sqlite3.connect(self.db_path)
+        try:
+            dst = sqlite3.connect(dest)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+        return dest
+
+    def prune_backups(self, keep: int = 10) -> int:
+        """Mantém só os `keep` backups mais recentes. Devolve quantos apagou."""
+        backups = sorted(self.db_path.parent.glob(f"{self.db_path.name}.bak-*"))
+        old = backups[:-keep] if keep > 0 else backups
+        for path in old:
+            path.unlink(missing_ok=True)
+        return len(old)
+
+    def get_fingerprint_by_page(self, page_id: str) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT fingerprint FROM proposals WHERE notion_page_id = ?", (page_id,)
+            ).fetchone()
+            return row["fingerprint"] if row else None
+
+    def cleanup_invalid_state(self, user_name: str | None = None) -> dict[str, int]:
+        """Remove lixo histórico: dry-runs gravados, alertas/o próprio utilizador como recruiter."""
+        with self._connect() as conn:
+            dry = conn.execute(
+                "DELETE FROM processed_emails WHERE outcome = 'proposal_dry_run'"
+            ).rowcount
+            clauses = ["name LIKE 'Your job alert%'", "name LIKE '%job alert has been created%'"]
+            params: list[str] = []
+            if user_name:
+                clauses.append("lower(name) = lower(?)")
+                params.append(user_name)
+            where = " OR ".join(clauses)
+            conn.execute(
+                f"DELETE FROM recruiter_messages WHERE name IN "
+                f"(SELECT name FROM recruiters WHERE {where})",
+                params,
+            )
+            rec = conn.execute(f"DELETE FROM recruiters WHERE {where}", params).rowcount
+        return {"dry_run_emails": dry, "invalid_recruiters": rec}
+
+    def list_proposals(self) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM proposals ORDER BY created_at"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def delete_proposal(self, fingerprint: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM proposals WHERE fingerprint = ?", (fingerprint,))
+
+    def find_duplicate_groups(self) -> list[list[dict]]:
+        """Grupos de propostas locais que parecem a mesma vaga (mais antiga primeiro)."""
+        proposals = self.list_proposals()
+        parent = list(range(len(proposals)))
+
+        def find(i: int) -> int:
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        for i, a in enumerate(proposals):
+            for j in range(i + 1, len(proposals)):
+                b = proposals[j]
+                if not a["role_title"] or not b["role_title"]:
+                    continue
+                if a["job_id"] and a["job_id"] == b["job_id"]:
+                    same = True
+                else:
+                    an = [n for n in (a["company_client"], a["agency"]) if n]
+                    bn = [n for n in (b["company_client"], b["agency"]) if n]
+                    same = any(
+                        opportunities_match(
+                            x, a["role_title"], a["location"], a["contract_type"],
+                            y, b["role_title"], b["location"], b["contract_type"],
+                        )
+                        for x in an
+                        for y in bn
+                    )
+                    if not same and (not an or not bn):
+                        ra, rb = _normalize(a["recruiter_name"] or ""), _normalize(b["recruiter_name"] or "")
+                        same = bool(ra) and ra == rb and roles_similar(a["role_title"], b["role_title"])
+                if same:
+                    parent[find(j)] = find(i)
+
+        groups: dict[int, list[dict]] = {}
+        for i, p in enumerate(proposals):
+            groups.setdefault(find(i), []).append(p)
+        return [g for g in groups.values() if len(g) > 1]
+
+    def merge_proposals(self, keep_fingerprint: str, drop_fingerprint: str) -> None:
+        """Junta `drop` em `keep`: proveniência, emails e avaliações passam para `keep`."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE OR IGNORE proposal_sources SET fingerprint = ? WHERE fingerprint = ?",
+                (keep_fingerprint, drop_fingerprint),
+            )
+            conn.execute("DELETE FROM proposal_sources WHERE fingerprint = ?", (drop_fingerprint,))
+            conn.execute(
+                "UPDATE processed_emails SET fingerprint = ? WHERE fingerprint = ?",
+                (keep_fingerprint, drop_fingerprint),
+            )
+            conn.execute(
+                "UPDATE assessments SET fingerprint = ? WHERE fingerprint = ?",
+                (keep_fingerprint, drop_fingerprint),
+            )
+            conn.execute("DELETE FROM proposals WHERE fingerprint = ?", (drop_fingerprint,))

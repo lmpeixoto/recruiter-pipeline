@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from recruiter_pipeline.config import Config
+from recruiter_pipeline.decision import apply_guardrails, parse_rules
 from recruiter_pipeline.jev_client import JevClient
 from recruiter_pipeline.llm import LLMClient
 from recruiter_pipeline.models import (
@@ -11,6 +12,7 @@ from recruiter_pipeline.models import (
     OpportunityAssessment,
     ProposalExtraction,
     RecruiterMessage,
+    missing_information,
 )
 
 PROMPT_PATH = Path(__file__).resolve().parent.parent.parent / "prompts" / "assess.txt"
@@ -30,7 +32,10 @@ RECOMMENDED_ACTION_OPTIONS = {
     "reply": "Fit parece bom, vale responder.",
     "ask_for_more_information": "Fit potencial bom mas faltam dados críticos (empresa, salário, remote).",
     "apply": "Vaga concreta com excelente fit e dados suficientes.",
-    "ignore": "Claramente não encaixa (dealbreaker evidente).",
+    "ignore": (
+        "Dealbreaker evidente e confirmado pelos dados. Falta de informação "
+        "NÃO é motivo para ignorar -- nesse caso escolhe ask_for_more_information."
+    ),
     "monitor": "Incerto mas não urgente.",
     "connect": "Convite de ligação sem vaga.",
 }
@@ -97,6 +102,7 @@ class Assessor:
         )
         if self.jev:
             self._apply_jev_decisions(assessment, user_prompt)
+        apply_guardrails(assessment, extraction, parse_rules(self.profile))
         return assessment
 
     def _apply_jev_decisions(
@@ -124,16 +130,22 @@ class Assessor:
 
         action_answer = answers["recommended_action"]
         action_confidence = action_answer.get("confidence")
+        assessment.jev_confidence = action_confidence
         if action_confidence is None or action_confidence >= JEV_MIN_CONFIDENCE:
             jev_action = action_answer["choice"]
             if jev_action != assessment.recommended_action:
-                # O action_reason do LLM foi escrito a justificar a ação original --
-                # sem esta nota, o card no Notion mostra a ação do Jev ao lado de
-                # uma justificação que pode argumentar o contrário.
-                assessment.action_reason = (
-                    f"[Jev mudou a ação de '{assessment.recommended_action}' para "
-                    f"'{jev_action}'] {assessment.action_reason}"
-                ).strip()
+                # A mudança fica na decision_trace (DB), não no action_reason --
+                # o card é para decidir, não para depurar o modelo.
+                assessment.decision_trace = "; ".join(
+                    filter(
+                        None,
+                        [
+                            assessment.decision_trace,
+                            f"jev: {assessment.recommended_action} → {jev_action}",
+                        ],
+                    )
+                )
+                assessment.action_source = "jev"
             assessment.recommended_action = jev_action
 
     def _build_prompt(
@@ -149,6 +161,13 @@ class Assessor:
             "DADOS EXTRAÍDOS DA MENSAGEM (JSON):",
             json.dumps(extraction.model_dump(), ensure_ascii=False, default=str),
         ]
+        missing = missing_information(extraction)
+        if missing:
+            parts += [
+                "",
+                "INFORMAÇÃO EM FALTA NA MENSAGEM (não é motivo para ignorar): "
+                + ", ".join(missing),
+            ]
         if enrichment:
             parts += [
                 "",

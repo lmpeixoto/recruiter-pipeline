@@ -19,7 +19,8 @@ A tua tarefa é avaliar a oportunidade e devolver APENAS um objeto JSON com este
   "company_fit": 0-100 | null,
   "recommended_action": "reply | ask_for_more_information | apply | ignore | monitor | connect",
   "action_reason": "string curta em português",
-  "questions_to_ask": ["string em português"]
+  "questions_to_ask": ["string em português"],
+  "reply_draft": "string em português"
 }
 
 Regras importantes:
@@ -35,3 +36,5 @@ Regras importantes:
   - "monitor" se incerto mas não urgente.
   - "connect" se é convite de ligação sem vaga.
 - "questions_to_ask": as 2-4 perguntas com maior impacto na decisão, sobre o que falta (empresa cliente, salário, remote policy, on-call, contrato). Lista vazia se nada faltar.
+- "ignore" SÓ quando há um dealbreaker explícito do perfil confirmado pelos dados. Falta de informação (empresa, salário, remote, stack) NUNCA é motivo para ignorar: usa "ask_for_more_information" (fit potencial) ou "monitor". Mensagens de job alert trazem pouca informação por natureza.
+- "reply_draft": só para "reply", "apply" ou "ask_for_more_information": 2-4 frases, tom profissional e direto, em português (ou inglês se a mensagem original for em inglês), a agradecer, mostrar interesse e fazer as questions_to_ask. Para as restantes ações, string vazia.

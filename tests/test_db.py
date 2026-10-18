@@ -154,3 +154,110 @@ class TestFingerprintMigrationCascades:
         assert len(rows) == 1
         assert rows[0]["fingerprint"] == new_fingerprint
         assert rows[0]["message_id"] == "msg-1"
+
+
+class TestDedupeLayers:
+    def _seed(self, db, **kw):
+        base = dict(
+            fingerprint="vestas::platform engineering specialist::leca do balio::",
+            notion_page_id="page-1",
+            company_client="Vestas",
+            agency=None,
+            role_title="Platform Engineering Specialist",
+            location="Leça do Balio, Grande Porto, PT",
+        )
+        base.update(kw)
+        db.upsert_proposal(**base)
+
+    def test_location_typo_matches_same_job(self, tmp_path: Path) -> None:
+        db = StateDB(db_path=tmp_path / "t.db")
+        self._seed(db)
+        page_id, fp = db.find_proposal(
+            "Vestas", None, "Platform Engineering Specialist", "Leça do Bailio", None
+        )
+        assert page_id == "page-1"
+
+    def test_job_id_wins_over_everything(self, tmp_path: Path) -> None:
+        db = StateDB(db_path=tmp_path / "t.db")
+        self._seed(db, job_id="12345")
+        page_id, fp = db.find_proposal(
+            "Other Co", None, "Totally different", "Lisboa", None, job_id="12345"
+        )
+        assert page_id == "page-1"
+        assert fp == "vestas::platform engineering specialist::leca do balio::"
+
+    def test_agency_in_one_email_client_in_another(self, tmp_path: Path) -> None:
+        db = StateDB(db_path=tmp_path / "t.db")
+        self._seed(db, company_client=None, agency="Jobgether",
+                   role_title="Senior Platform Engineer", location="Portugal",
+                   fingerprint="jobgether::senior platform engineer::portugal::")
+        page_id, _ = db.find_proposal(
+            "Scopely", "Jobgether", "Senior Platform Engineer (Reliability)", "Portugal", None
+        )
+        assert page_id == "page-1"
+
+    def test_same_recruiter_and_role_without_company(self, tmp_path: Path) -> None:
+        db = StateDB(db_path=tmp_path / "t.db")
+        self._seed(db, company_client=None, agency=None, role_title="Site Reliability Engineer",
+                   location=None, fingerprint="unknown::site reliability engineer::::",
+                   recruiter_name="Ana Silva")
+        page_id, _ = db.find_proposal(
+            None, None, "Site Reliability Engineer", None, "contract", recruiter_name="Ana Silva"
+        )
+        assert page_id == "page-1"
+        # outro recruiter, mesmo role, sem empresa: não é evidência
+        # (DB nova: o match acima migra o fingerprint e daria match exato)
+        db = StateDB(db_path=tmp_path / "t2.db")
+        self._seed(db, company_client=None, agency=None, role_title="Site Reliability Engineer",
+                   location=None, fingerprint="unknown::site reliability engineer::::",
+                   recruiter_name="Ana Silva")
+        page_id, _ = db.find_proposal(
+            None, None, "Site Reliability Engineer", None, "contract", recruiter_name="Rui Costa"
+        )
+        assert page_id is None
+
+    def test_different_city_is_a_different_job(self, tmp_path: Path) -> None:
+        db = StateDB(db_path=tmp_path / "t.db")
+        self._seed(db, location="Lisboa")
+        page_id, _ = db.find_proposal(
+            "Vestas", None, "Platform Engineering Specialist", "Porto", None
+        )
+        assert page_id is None
+
+
+class TestMaintenance:
+    def test_cleanup_removes_dry_runs_and_fake_recruiters(self, tmp_path: Path) -> None:
+        db = StateDB(db_path=tmp_path / "t.db")
+        db.mark_email_processed("a", "proposal_dry_run")
+        db.mark_email_processed("b", "proposal")
+        db.record_recruiter("Your job alert for X in Porto", None, "2026-01-01", "m1")
+        db.record_recruiter("Luís Peixoto", None, "2026-01-01", "m2")
+        db.record_recruiter("Ana Silva", "Acme", "2026-01-01", "m3")
+        result = db.cleanup_invalid_state(user_name="Luís Peixoto")
+        assert result == {"dry_run_emails": 1, "invalid_recruiters": 2}
+        assert [r["name"] for r in db.list_recruiters()] == ["Ana Silva"]
+        assert db.is_email_processed("b") and not db.is_email_processed("a")
+
+    def test_backup_is_a_readable_copy(self, tmp_path: Path) -> None:
+        db = StateDB(db_path=tmp_path / "t.db")
+        db.mark_email_processed("a", "proposal")
+        copy = db.backup()
+        assert copy.exists() and copy != db.db_path
+        assert StateDB(db_path=copy).is_email_processed("a")
+
+    def test_duplicate_groups_and_merge(self, tmp_path: Path) -> None:
+        db = StateDB(db_path=tmp_path / "t.db")
+        for i, loc in enumerate(["Leça do Balio", "Leça do Bailio"]):
+            db.upsert_proposal(
+                fingerprint=f"fp{i}", notion_page_id=f"p{i}", company_client="Vestas",
+                agency=None, role_title="Platform Engineering Specialist", location=loc,
+                source_message_id=f"m{i}", source="LinkedIn Job Alert",
+            )
+        groups = db.find_duplicate_groups()
+        assert len(groups) == 1 and len(groups[0]) == 2
+        keep, drop = groups[0][0]["fingerprint"], groups[0][1]["fingerprint"]
+        db.merge_proposals(keep, drop)
+        assert [p["fingerprint"] for p in db.list_proposals()] == [keep]
+        with db._connect() as conn:
+            n = conn.execute("SELECT count(*) FROM proposal_sources WHERE fingerprint=?", (keep,)).fetchone()[0]
+        assert n == 2

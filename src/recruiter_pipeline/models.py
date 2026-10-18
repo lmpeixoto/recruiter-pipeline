@@ -26,6 +26,7 @@ class RecruiterMessage(BaseModel):
     permalink: str | None = None
     email_type: str = "dm"  # dm, job_alert, notification
     company_linkedin_guess: str | None = None  # link linkedin.com/company/* detetado no HTML
+    job_id: str | None = None  # id da vaga no LinkedIn (/jobs/view/<id>), chave de dedupe
 
     @property
     def source(self) -> str:
@@ -160,6 +161,13 @@ class OpportunityAssessment(BaseModel):
     )
     action_reason: str = ""
     questions_to_ask: list[str] = Field(default_factory=list)
+    reply_draft: str = Field(
+        default="", description="Rascunho curto de resposta ao recruiter, em português"
+    )
+    # Metadados internos (não vêm do LLM; não aparecem no card, ficam na DB)
+    action_source: str = "llm"  # llm | jev | guardrail | rule
+    decision_trace: str = ""  # histórico de mudanças de ação (Jev, guardrails, regras)
+    jev_confidence: float | None = None
 
     def dimensions_markdown(self) -> list[str]:
         """Linhas legíveis com os scores por dimensão (ignora as desconhecidas)."""
@@ -215,6 +223,60 @@ def _tokens(text: str) -> set[str]:
     return set(_normalize(text).split())
 
 
+_LOCATION_NOISE = {"portugal", "pt", "area", "metropolitan", "metropolitana", "grande", "de", "do", "da"}
+
+
+def _location_tokens(text: str) -> set[str]:
+    return {t for t in _tokens(text) if t not in _LOCATION_NOISE}
+
+
+# Países/cidades estrangeiras comuns: "Portugal" genérico não é compatível com estas.
+_FOREIGN_TOKENS = {
+    "kingdom", "uk", "england", "london", "spain", "espana", "madrid", "barcelona",
+    "germany", "berlin", "munich", "france", "paris", "ireland", "dublin",
+    "netherlands", "amsterdam", "usa", "states", "canada", "brazil", "brasil",
+    "poland", "romania", "india", "switzerland", "italy", "belgium", "sweden",
+}
+
+
+def _similar_token(a: str, b: str) -> bool:
+    """Tokens iguais ou quase (typos como balio/bailio)."""
+    if a == b:
+        return True
+    if len(a) >= 4 and len(b) >= 4:
+        from difflib import SequenceMatcher
+
+        return SequenceMatcher(None, a, b).ratio() >= 0.8
+    return False
+
+
+def locations_compatible(a: str | None, b: str | None) -> bool:
+    """True se duas localizações não se contradizem.
+
+    Desconhecida ou genérica ("Portugal") é compatível com tudo; "Porto" e
+    "Porto, Portugal" são a mesma; "Leça do Balio" e "Leça do Bailio" também.
+    "remote" é compatível com tudo (a vaga pode listar sede + remote).
+    """
+    if not a or not b:
+        return True
+    ta, tb = _location_tokens(a), _location_tokens(b)
+    if bool(ta & _FOREIGN_TOKENS) != bool(tb & _FOREIGN_TOKENS):
+        return False  # um estrangeiro, o outro não (nem que seja só "Portugal")
+    if not ta or not tb:
+        return True  # só "Portugal"/"PT" -> genérico
+    if "remote" in ta or "remote" in tb or "remoto" in ta or "remoto" in tb:
+        return True
+    return any(_similar_token(x, y) for x in ta for y in tb)
+
+
+def roles_similar(role: str, other_role: str, threshold: float = 0.5) -> bool:
+    """Jaccard de tokens entre dois títulos de vaga."""
+    a, b = _tokens(role), _tokens(other_role)
+    if not a or not b:
+        return False
+    return len(a & b) / len(a | b) >= threshold
+
+
 def opportunities_match(
     company: str,
     role: str,
@@ -232,14 +294,9 @@ def opportunities_match(
     """
     if _normalize(company) != _normalize(other_company):
         return False
-    a = _tokens(role)
-    b = _tokens(other_role)
-    if not a or not b:
+    if not roles_similar(role, other_role):
         return False
-    jaccard = len(a & b) / len(a | b)
-    if jaccard < 0.5:
-        return False
-    if location and other_location and _normalize(location) != _normalize(other_location):
+    if not locations_compatible(location, other_location):
         return False
     if contract and other_contract and _normalize(contract) != _normalize(other_contract):
         return False

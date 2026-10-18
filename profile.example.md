@@ -19,3 +19,11 @@
 - Empresa confidencial sem possibilidade de revelar antes da entrevista
 - On-call 24/7 não compensado
 - Vagas que exigem deslocação diária para fora do Porto
+
+## Regras
+<!-- Opcional. Dealbreakers EXPLÍCITOS, aplicados antes do LLM: um match força
+     "Descartar" com o motivo no card. Sem isto, "Descartar" só acontece com
+     fit baixo E confiança alta -- falta de informação nunca descarta. -->
+- avoid_stack: .NET
+- avoid_companies:
+- avoid_agencies:
