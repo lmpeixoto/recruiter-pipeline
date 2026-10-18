@@ -896,12 +896,22 @@ class NotionBoard:
 
     @staticmethod
     def _chunk_text(text: str, max_length: int = 1990) -> list[str]:
-        """Divide um texto em chunks que respeitem o limite de caracteres do Notion."""
+        """Divide um texto em chunks que respeitem o limite do Notion.
+
+        O Notion conta unidades UTF-16 (um emoji são 2), não caracteres Python.
+        """
         chunks: list[str] = []
-        while text:
-            chunk = text[:max_length]
-            chunks.append(chunk)
-            text = text[max_length:]
+        current: list[str] = []
+        size = 0
+        for char in text:
+            width = 2 if ord(char) > 0xFFFF else 1
+            if size + width > max_length:
+                chunks.append("".join(current))
+                current, size = [], 0
+            current.append(char)
+            size += width
+        if current:
+            chunks.append("".join(current))
         return chunks or [""]
 
     @staticmethod
