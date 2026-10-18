@@ -16,6 +16,7 @@ from recruiter_pipeline.enricher import Enricher
 from recruiter_pipeline.extractor import Extractor
 from recruiter_pipeline.gmail_client import GmailClient, is_notification_email
 from recruiter_pipeline.jev_client import JevClient
+from recruiter_pipeline.llm import LLMClient
 from recruiter_pipeline.models import Classification, Proposal
 from recruiter_pipeline.notion_board import NotionBoard
 
@@ -207,13 +208,15 @@ def run(
     Config.validate()
     state_db = StateDB()
     gmail = GmailClient()
-    # Um único JevClient partilhado por Classifier/Assessor -- permite
-    # somar custo/nº de chamadas do run inteiro no resumo final.
+    # Um único LLMClient/JevClient partilhado por Classifier/Extractor/
+    # Assessor -- permite somar custo/nº de chamadas do run inteiro, dos
+    # dois lados, no resumo final.
+    llm = LLMClient()
     jev = JevClient() if Config.jev_model else None
-    classifier = Classifier(jev=jev)
-    extractor = Extractor()
+    classifier = Classifier(llm=llm, jev=jev)
+    extractor = Extractor(llm=llm)
     enricher = None if skip_enrichment else Enricher()
-    assessor = None if skip_assessment else Assessor(jev=jev)
+    assessor = None if skip_assessment else Assessor(llm=llm, jev=jev)
     board = None if dry_run else NotionBoard()
 
     if jev:
@@ -278,7 +281,8 @@ def run(
             continue
 
         if not process_all and message.email_type == "notification":
-            state_db.mark_email_processed(message.message_id, "not_opportunity")
+            if not dry_run:
+                state_db.mark_email_processed(message.message_id, "not_opportunity")
             skipped += 1
             if show_skipped:
                 console.print(
@@ -295,9 +299,10 @@ def run(
                 classification = classifier.classify(message)
 
             if not classification.is_opportunity:
-                state_db.mark_email_processed(
-                    message.message_id, "not_opportunity"
-                )
+                if not dry_run:
+                    state_db.mark_email_processed(
+                        message.message_id, "not_opportunity"
+                    )
                 skipped += 1
                 if show_skipped:
                     console.print(
@@ -306,9 +311,6 @@ def run(
                 continue
 
             extraction = extractor.extract(message)
-            assessment = None
-            if assessor and assessor.available:
-                assessment = assessor.assess(message, extraction, None)
             enrichment = None
             # Enriquece a empresa cliente; se for confidencial, enriquece a agência
             enrich_target = extraction.company_client or extraction.agency
@@ -319,6 +321,9 @@ def run(
                     linkedin_hint=extraction.company_linkedin
                     or message.company_linkedin_guess,
                 )
+            assessment = None
+            if assessor and assessor.available:
+                assessment = assessor.assess(message, extraction, enrichment)
 
             proposal = Proposal(
                 message=message,
@@ -355,11 +360,8 @@ def run(
                     f"  [green]✓[/green] {extraction.company_client or extraction.agency or 'Confidencial'} — {extraction.role_title or 'Role desconhecido'}"
                 )
             else:
-                state_db.mark_email_processed(
-                    message.message_id,
-                    "proposal_dry_run",
-                    fingerprint=proposal.fingerprint(),
-                )
+                # dry-run: não grava nada em state_db -- uma pré-visualização
+                # não pode mudar o que um run real a seguir vai processar.
                 console.print(
                     f"  [yellow]~[/yellow] {extraction.company_client or extraction.agency or 'Confidencial'} — {extraction.role_title or 'Role desconhecido'}"
                 )
@@ -369,16 +371,22 @@ def run(
             errors += 1
 
     _print_summary(proposals, skipped, errors, dry_run)
+    console.print(
+        f"[cyan]LLM: {llm.call_count} chamadas, {llm.total_tokens} tokens totais[/cyan]"
+    )
     if jev:
         console.print(
             f"[cyan]Jev: {jev.call_count} chamadas, custo total "
             f"${jev.total_cost:.4f}[/cyan]"
         )
-    state_db.record_run(
-        emails_processed=len(messages),
-        proposals_created=len(proposals),
-        errors=errors,
-    )
+    if not dry_run:
+        # dry-run não avança o checkpoint de --since-last-run nem grava no
+        # histórico de runs -- é só uma pré-visualização.
+        state_db.record_run(
+            emails_processed=len(messages),
+            proposals_created=len(proposals),
+            errors=errors,
+        )
 
 
 @app.command()

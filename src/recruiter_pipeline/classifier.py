@@ -29,6 +29,10 @@ class Classifier:
     /api/alpha/decisions (uma pergunta Noul) e NÃO há chamada ao LLM
     generativo -- é o ponto do teste de eficiência. O resto do pipeline
     (Extractor/Assessor) continua a usar o LLM normal.
+
+    llm e jev são independentes (mesmo padrão do Assessor) -- partilhar um
+    LLMClient (para agregar call_count/total_tokens entre Classifier/
+    Extractor/Assessor) não desliga o Jev; isso é só o param/config jev.
     """
 
     def __init__(
@@ -37,18 +41,10 @@ class Classifier:
         jev: JevClient | None = None,
     ) -> None:
         self.system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
-        if llm is not None:
-            self.llm: LLMClient | None = llm
-            self.jev: JevClient | None = None
-        elif jev is not None:
-            self.llm = None
-            self.jev = jev
-        elif Config.jev_model:
-            self.llm = None
-            self.jev = JevClient()
-        else:
-            self.llm = LLMClient()
-            self.jev = None
+        self.jev = jev if jev is not None else (JevClient() if Config.jev_model else None)
+        # Só constrói um LLMClient real se vai ser mesmo usado -- com Jev
+        # ativo, classify() nunca toca em self.llm.
+        self.llm = llm or (None if self.jev else LLMClient())
 
     @property
     def using_jev(self) -> bool:

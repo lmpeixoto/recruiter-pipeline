@@ -21,6 +21,8 @@ class LLMClient:
             base_url="https://openrouter.ai/api/v1",
             api_key=self.api_key,
         )
+        self.call_count = 0
+        self.total_tokens = 0
 
     def complete(
         self,
@@ -47,6 +49,9 @@ class LLMClient:
                         "type": "json_object",
                     },
                 )
+                self.call_count += 1
+                if response.usage:
+                    self.total_tokens += response.usage.total_tokens
                 content = response.choices[0].message.content or "{}"
                 data = json.loads(content)
                 return response_model.model_validate(data)
