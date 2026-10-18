@@ -15,6 +15,7 @@ from recruiter_pipeline.db import StateDB
 from recruiter_pipeline.enricher import Enricher
 from recruiter_pipeline.extractor import Extractor
 from recruiter_pipeline.gmail_client import GmailClient, is_notification_email
+from recruiter_pipeline.jev_client import JevClient
 from recruiter_pipeline.models import Classification, Proposal
 from recruiter_pipeline.notion_board import NotionBoard
 
@@ -206,11 +207,21 @@ def run(
     Config.validate()
     state_db = StateDB()
     gmail = GmailClient()
-    classifier = Classifier()
+    # Um único JevClient partilhado por Classifier/Assessor -- permite
+    # somar custo/nº de chamadas do run inteiro no resumo final.
+    jev = JevClient() if Config.jev_model else None
+    classifier = Classifier(jev=jev)
     extractor = Extractor()
     enricher = None if skip_enrichment else Enricher()
-    assessor = None if skip_assessment else Assessor()
+    assessor = None if skip_assessment else Assessor(jev=jev)
     board = None if dry_run else NotionBoard()
+
+    if jev:
+        console.print(
+            f"[cyan]Jev ativo ({jev.model}): is_opportunity, opportunity_type e "
+            "recommended_action correm no modelo de decisão; o resto (extração, "
+            "scores, texto) fica no LLM.[/cyan]"
+        )
 
     if assessor and not assessor.available:
         console.print(
@@ -358,6 +369,11 @@ def run(
             errors += 1
 
     _print_summary(proposals, skipped, errors, dry_run)
+    if jev:
+        console.print(
+            f"[cyan]Jev: {jev.call_count} chamadas, custo total "
+            f"${jev.total_cost:.4f}[/cyan]"
+        )
     state_db.record_run(
         emails_processed=len(messages),
         proposals_created=len(proposals),
