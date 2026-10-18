@@ -67,3 +67,17 @@ class LLMClient:
         raise RuntimeError(
             f"Falha ao obter resposta válida do LLM após {max_retries + 1} tentativas: {last_error}"
         )
+
+
+FATAL_STATUS_CODES = {401, 402, 403}
+
+
+def is_fatal_api_error(exc: Exception) -> bool:
+    """Erros que se repetiriam em todas as mensagens (sem crédito, chave inválida).
+
+    Continuar só queima tempo e enche o log de erros idênticos.
+    """
+    if getattr(exc, "status_code", None) in FATAL_STATUS_CODES:
+        return True
+    # JevError não tem status_code: a mensagem é "... devolveu <código>: ..."
+    return any(f"devolveu {code}" in str(exc) for code in FATAL_STATUS_CODES)

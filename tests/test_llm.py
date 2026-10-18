@@ -68,3 +68,15 @@ class TestCallTracking:
             pass
         assert client.call_count == 1
         assert client.total_tokens == 7
+
+
+def test_is_fatal_api_error():
+    from recruiter_pipeline.jev_client import JevError
+    from recruiter_pipeline.llm import is_fatal_api_error
+
+    class Err(Exception):
+        status_code = 402
+
+    assert is_fatal_api_error(Err("x"))
+    assert is_fatal_api_error(JevError("/api/alpha/decisions devolveu 401: bad key"))
+    assert not is_fatal_api_error(RuntimeError("timeout"))
