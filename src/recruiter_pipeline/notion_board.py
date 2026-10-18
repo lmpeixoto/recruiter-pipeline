@@ -1,12 +1,14 @@
 """Integração com Notion: criação de database e upsert de cards."""
 
 import time
+from datetime import datetime
 
 import httpx
 from notion_client import Client
 
 from recruiter_pipeline.config import Config
 from recruiter_pipeline.db import StateDB
+from recruiter_pipeline.decision import triage
 from recruiter_pipeline.models import (
     CompanyEnrichment,
     OpportunityAssessment,
@@ -54,6 +56,22 @@ RECOMMENDED_ACTIONS = {
     "monitor": "Monitorizar",
     "connect": "Conectar",
 }
+
+
+# Motivos de rejeição/arquivo -- alimentam o comando `learn`
+REJECTION_REASONS = [
+    "Salário",
+    "Stack",
+    "Localização",
+    "Remote",
+    "Empresa / Agência",
+    "Senioridade",
+    "Sem resposta",
+    "Outro",
+]
+
+NOTES_HEADING = "Minhas notas"
+ANCHOR_EMOJI = "🤖"
 
 
 class NotionBoard:
@@ -146,6 +164,19 @@ class NotionBoard:
             "Setor": {"select": {"options": []}},
             "Consultora": {"checkbox": {}},
             "Feedback": {"rich_text": {}},
+            "Motivo": {
+                "select": {"options": [{"name": r} for r in REJECTION_REASONS]}
+            },
+            "Triagem": {
+                "select": {
+                    "options": [
+                        {"name": "🟢 Responder", "color": "green"},
+                        {"name": "🟡 Pedir info", "color": "yellow"},
+                        {"name": "⚪ Monitorizar", "color": "gray"},
+                        {"name": "🔴 Descartar", "color": "red"},
+                    ]
+                }
+            },
             "Recebida": {"date": {}},
             "Link": {"url": {}},
         }
@@ -201,6 +232,8 @@ class NotionBoard:
             role_title=extraction.role_title,
             location=extraction.location,
             contract_type=extraction.contract_type,
+            recruiter_name=extraction.recruiter_name,
+            job_id=message.job_id,
         )
 
         properties = self._build_properties(extraction, message, enrichment, assessment)
@@ -214,7 +247,7 @@ class NotionBoard:
                     page_id=existing_page_id,
                     properties=properties,
                 )
-                self._replace_page_content(existing_page_id, page_content)
+                self._refresh_page_content(existing_page_id, page_content)
                 page_id = existing_page_id
                 # Regista este avistamento na proveniência, mesmo em update
                 self.db.upsert_proposal(
@@ -229,6 +262,8 @@ class NotionBoard:
                     source_message_id=message.message_id,
                     source_url=message.permalink,
                     source_received_at=message.received_at.isoformat(),
+                    job_id=message.job_id,
+                    recruiter_name=extraction.recruiter_name,
                 )
             except Exception:
                 # A página mapeada pode ter sido arquivada/apagada (ex.: reset da database)
@@ -243,7 +278,7 @@ class NotionBoard:
             page = self.client.pages.create(
                 parent={"database_id": database_id},
                 properties=properties,
-                children=page_content,
+                children=page_content + self._notes_blocks(),
             )
             page_id = page["id"]
             self.db.upsert_proposal(
@@ -258,6 +293,8 @@ class NotionBoard:
                 source_message_id=message.message_id,
                 source_url=message.permalink,
                 source_received_at=message.received_at.isoformat(),
+                job_id=message.job_id,
+                recruiter_name=extraction.recruiter_name,
             )
 
         return page_id
@@ -359,8 +396,29 @@ class NotionBoard:
         def url(name: str) -> str | None:
             return props.get(name, {}).get("url") or None
 
+        def select(name: str) -> str | None:
+            sel = props.get(name, {}).get("select")
+            return sel.get("name") if sel else None
+
+        def number(name: str) -> float | None:
+            return props.get(name, {}).get("number")
+
+        def date(name: str) -> str | None:
+            d = props.get(name, {}).get("date")
+            return d.get("start") if d else None
+
         company = rich_text("Empresa") or title()
         return {
+            "estado": select("Estado"),
+            "acao": select("Acao"),
+            "triagem": select("Triagem"),
+            "motivo": select("Motivo"),
+            "fit": number("Fit"),
+            "feedback": rich_text("Feedback") or None,
+            "recebida": date("Recebida"),
+            "last_edited": page.get("last_edited_time"),
+            "archived": bool(page.get("archived") or page.get("in_trash")),
+            "url": page.get("url"),
             "page_id": page["id"],
             "company": company,
             "role": rich_text("Role") or None,
@@ -387,6 +445,10 @@ class NotionBoard:
             properties["Teamlyzer"] = {"url": teamlyzer}
         if properties:
             self.client.pages.update(page_id=page_id, properties=properties)
+
+    def archive_page(self, page_id: str) -> None:
+        """Arquiva um card (recuperável no lixo do Notion)."""
+        self.client.pages.update(page_id=page_id, archived=True)
 
     def has_enrichment_section(self, page_id: str) -> bool:
         """True se o card já tem uma secção 'Sobre a empresa'."""
@@ -482,6 +544,9 @@ class NotionBoard:
             action = RECOMMENDED_ACTIONS.get(assessment.recommended_action)
             if action:
                 properties["Acao"] = {"select": {"name": action}}
+            properties["Triagem"] = {
+                "select": {"name": triage(assessment.recommended_action)}
+            }
 
         # Remove propriedades vazias de select (Notion rejeita string vazia)
         for key in ["Remote", "Contrato"]:
@@ -497,7 +562,7 @@ class NotionBoard:
         enrichment: CompanyEnrichment | None,
         assessment: OpportunityAssessment | None = None,
     ) -> list[dict]:
-        blocks: list[dict] = []
+        blocks: list[dict] = [self._anchor_block(message)]
 
         # 1) Cabeçalho de decisão: o que é, quão bom, o que fazer
         if assessment:
@@ -512,6 +577,8 @@ class NotionBoard:
                 if assessment.fit_score is not None
                 else "—"
             )
+            if assessment.fit_score is not None and assessment.fit_confidence < 50:
+                fit += " (provisório — pouca informação)"
             decision_lines = [
                 f"Tipo: {opp_type}",
                 f"Fit: {fit} (confiança: {assessment.fit_confidence}/100)",
@@ -602,6 +669,33 @@ class NotionBoard:
                             },
                         }
                     )
+
+        # 2b) Rascunho de resposta, pronto a colar no LinkedIn
+        if assessment and assessment.reply_draft.strip():
+            blocks.append(
+                {
+                    "object": "block",
+                    "type": "heading_2",
+                    "heading_2": {
+                        "rich_text": [
+                            {
+                                "type": "text",
+                                "text": {"content": "Rascunho de resposta"},
+                            }
+                        ]
+                    },
+                }
+            )
+            for chunk in self._chunk_text(assessment.reply_draft.strip()):
+                blocks.append(
+                    {
+                        "object": "block",
+                        "type": "quote",
+                        "quote": {
+                            "rich_text": [{"type": "text", "text": {"content": chunk}}]
+                        },
+                    }
+                )
 
         # 3) Resumo (extraído da mensagem)
         blocks.append(
@@ -809,6 +903,92 @@ class NotionBoard:
             chunks.append(chunk)
             text = text[max_length:]
         return chunks or [""]
+
+    @staticmethod
+    def _anchor_block(message: RecruiterMessage) -> dict:
+        """Primeiro bloco gerado: marca onde acaba o conteúdo do pipeline e começa o do utilizador."""
+        text = (
+            f"Atualizado a {datetime.now().strftime('%Y-%m-%d %H:%M')} · "
+            f"{message.source} · recebida a {message.received_at.date().isoformat()}"
+        )
+        return {
+            "object": "block",
+            "type": "callout",
+            "callout": {
+                "rich_text": [{"type": "text", "text": {"content": text}}],
+                "icon": {"type": "emoji", "emoji": ANCHOR_EMOJI},
+                "color": "gray_background",
+            },
+        }
+
+    @staticmethod
+    def _notes_blocks() -> list[dict]:
+        """Zona do utilizador, no fim do card: o pipeline nunca lhe toca em updates."""
+        return [
+            {
+                "object": "block",
+                "type": "heading_2",
+                "heading_2": {
+                    "rich_text": [{"type": "text", "text": {"content": NOTES_HEADING}}]
+                },
+            },
+            {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {"rich_text": []},
+            },
+        ]
+
+    def _list_children(self, page_id: str) -> list[dict]:
+        blocks: list[dict] = []
+        cursor: str | None = None
+        while True:
+            kwargs: dict = {"block_id": page_id, "page_size": 100}
+            if cursor:
+                kwargs["start_cursor"] = cursor
+            result = self.client.blocks.children.list(**kwargs)
+            blocks.extend(result.get("results", []))
+            if not result.get("has_more"):
+                return blocks
+            cursor = result.get("next_cursor")
+
+    @staticmethod
+    def _is_anchor(block: dict) -> bool:
+        return (
+            block.get("type") == "callout"
+            and block.get("callout", {}).get("icon", {}).get("emoji") == ANCHOR_EMOJI
+        )
+
+    @staticmethod
+    def _is_notes_heading(block: dict) -> bool:
+        if block.get("type") != "heading_2":
+            return False
+        texts = block.get("heading_2", {}).get("rich_text", [])
+        return "".join(t.get("plain_text", "") for t in texts) == NOTES_HEADING
+
+    def _refresh_page_content(self, page_id: str, new_blocks: list[dict]) -> None:
+        """Atualiza só o conteúdo gerado; preserva o que o utilizador escreveu em 'Minhas notas'.
+
+        Cards antigos (sem âncora/notas) são reescritos por inteiro uma vez e
+        passam a ter a zona de notas.
+        """
+        existing = self._list_children(page_id)
+        anchor_idx = next((i for i, b in enumerate(existing) if self._is_anchor(b)), None)
+        notes_idx = next((i for i, b in enumerate(existing) if self._is_notes_heading(b)), None)
+        if anchor_idx is None or notes_idx is None or notes_idx <= anchor_idx:
+            for block in existing:
+                self.client.blocks.delete(block_id=block["id"])
+            self.client.blocks.children.append(
+                block_id=page_id, children=new_blocks + self._notes_blocks()
+            )
+            return
+        anchor = existing[anchor_idx]
+        for block in existing[anchor_idx + 1 : notes_idx]:
+            self.client.blocks.delete(block_id=block["id"])
+        self.client.blocks.update(block_id=anchor["id"], callout=new_blocks[0]["callout"])
+        self.client.blocks.children.append(
+            block_id=page_id, children=new_blocks[1:], after=anchor["id"]
+        )
 
     def _replace_page_content(self, page_id: str, new_blocks: list[dict]) -> None:
         """Apaga o conteúdo existente e adiciona o novo."""

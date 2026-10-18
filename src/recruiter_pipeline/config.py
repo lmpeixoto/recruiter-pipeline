@@ -35,6 +35,9 @@ class Config:
     notion_token: str = os.getenv("NOTION_TOKEN", "")
     notion_parent_page_id: str = os.getenv("NOTION_PARENT_PAGE_ID", "")
 
+    # Nome do próprio utilizador: nunca deve contar como recruiter.
+    user_name: str = os.getenv("USER_NAME", "")
+
     tavily_api_key: str = os.getenv("TAVILY_API_KEY", "")
 
     state_db_path: Path = Path(

@@ -1,5 +1,7 @@
 """CLI do pipeline de propostas de recruiters."""
 
+import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -12,16 +14,41 @@ from recruiter_pipeline.assessor import Assessor
 from recruiter_pipeline.classifier import Classifier
 from recruiter_pipeline.config import Config
 from recruiter_pipeline.db import StateDB
+from recruiter_pipeline.decision import triage
+from recruiter_pipeline.digest import analyze_feedback, build_digest, notify
 from recruiter_pipeline.enricher import Enricher
 from recruiter_pipeline.extractor import Extractor
 from recruiter_pipeline.gmail_client import GmailClient, is_notification_email
+from recruiter_pipeline.job_alerts import fetch_job_description, split_job_alert
 from recruiter_pipeline.jev_client import JevClient
 from recruiter_pipeline.llm import LLMClient
-from recruiter_pipeline.models import Classification, Proposal
+from recruiter_pipeline.models import Classification, Proposal, RecruiterMessage
 from recruiter_pipeline.notion_board import NotionBoard
 
 app = typer.Typer(help="Pipeline de propostas de recruiters do LinkedIn")
 console = Console()
+
+
+def _backup_state(state_db: StateDB) -> None:
+    """Backup da state.db antes de qualquer operação que a altere em bloco."""
+    path = state_db.backup()
+    state_db.prune_backups(keep=10)
+    console.print(f"[dim]Backup da state.db: {path.name}[/dim]")
+
+
+def _expand_job_alerts(
+    messages: list[RecruiterMessage], state_db: StateDB, reprocess: bool
+) -> list[RecruiterMessage]:
+    """Job alerts passam a uma mensagem por vaga (alertas já processados ficam como estão)."""
+    expanded: list[RecruiterMessage] = []
+    for message in messages:
+        if message.email_type == "job_alert" and (
+            reprocess or not state_db.is_email_processed(message.message_id)
+        ):
+            expanded.extend(split_job_alert(message))
+        else:
+            expanded.append(message)
+    return expanded
 
 
 def _parse_date(date_str: Optional[str]) -> Optional[datetime]:
@@ -111,6 +138,7 @@ def reset_notion(
             if not confirmed:
                 console.print("[yellow]Cancelado.[/yellow]")
                 raise typer.Exit(0)
+        _backup_state(board.db)
         deleted = board.delete_database()
         if deleted:
             board.db.clear_proposals()
@@ -203,6 +231,19 @@ def run(
         "--mark-as-read",
         help="Marca os emails processados como lidos no Gmail",
     ),
+    fetch_job_details: bool = typer.Option(
+        False,
+        "--fetch-job-details",
+        help="Job alerts: vai buscar a descrição completa da vaga ao LinkedIn (pedido público, sem login)",
+    ),
+    review: bool = typer.Option(
+        False,
+        "--review",
+        help="Mostra cada proposta e pede confirmação antes de criar/atualizar o card",
+    ),
+    notify_done: bool = typer.Option(
+        False, "--notify", help="Notificação macOS com o resumo no fim do run"
+    ),
 ) -> None:
     """Executa o pipeline completo."""
     Config.validate()
@@ -266,6 +307,10 @@ def run(
         unread_only=unread_only,
     )
     console.print(f"[cyan]{len(messages)} emails encontrados[/cyan]")
+    messages = _expand_job_alerts(messages, state_db, reprocess)
+    console.print(f"[cyan]{len(messages)} mensagens a avaliar (job alerts divididos por vaga)[/cyan]")
+    if not dry_run:
+        _backup_state(state_db)
 
     proposals: list[Proposal] = []
     skipped = 0
@@ -295,6 +340,12 @@ def run(
                 classification = Classification(
                     is_opportunity=True, confidence=1.0, reason="--process-all ativo"
                 )
+            elif message.email_type == "job_alert" and message.job_id:
+                # Uma vaga listada num alerta é uma oportunidade por definição --
+                # não vale gastar classificação (nem arriscar um falso negativo).
+                classification = Classification(
+                    is_opportunity=True, confidence=1.0, reason="vaga de job alert"
+                )
             else:
                 classification = classifier.classify(message)
 
@@ -309,6 +360,14 @@ def run(
                         f"  [dim]⊘ {message.sender_name}: {classification.reason}[/dim]"
                     )
                 continue
+
+            if fetch_job_details and message.job_id:
+                description = fetch_job_description(message.job_id)
+                if description:
+                    message = message.model_copy(
+                        update={"body_text": f"{message.body_text}\n\n{description}"}
+                    )
+                time.sleep(1.0)  # simpático com o LinkedIn
 
             extraction = extractor.extract(message)
             enrichment = None
@@ -332,6 +391,17 @@ def run(
                 enrichment=enrichment,
                 assessment=assessment,
             )
+            if review:
+                label = extraction.company_client or extraction.agency or "Confidencial"
+                action = assessment.recommended_action if assessment else "—"
+                fit = assessment.fit_score if assessment else "—"
+                console.print(
+                    f"  [bold]{label}[/bold] — {extraction.role_title or 'role desconhecido'} "
+                    f"| fit {fit} | {triage(action) if assessment else action}"
+                )
+                if not typer.confirm("  Criar/atualizar este card?", default=True):
+                    skipped += 1
+                    continue
             proposals.append(proposal)
 
             if not dry_run and board:
@@ -342,7 +412,19 @@ def run(
                     enrichment=enrichment,
                     assessment=assessment,
                 )
-                if extraction.recruiter_name:
+                state_db.record_assessment(
+                    message,
+                    proposal.fingerprint(),
+                    classification,
+                    extraction,
+                    assessment,
+                )
+                # Só DMs têm um recruiter real: num job alert o "remetente" é
+                # o assunto do alerta (ou o próprio utilizador).
+                is_self = bool(Config.user_name) and (
+                    extraction.recruiter_name or ""
+                ).strip().lower() == Config.user_name.strip().lower()
+                if extraction.recruiter_name and message.email_type == "dm" and not is_self:
                     state_db.record_recruiter(
                         extraction.recruiter_name,
                         extraction.agency,
@@ -379,6 +461,11 @@ def run(
             f"[cyan]Jev: {jev.call_count} chamadas, custo total "
             f"${jev.total_cost:.4f}[/cyan]"
         )
+    if proposals:
+        title, body = build_digest(proposals)
+        console.print(f"[bold]{title}[/bold]\n{body}")
+        if notify_done and not dry_run and not notify(title, body):
+            console.print("[yellow]Não consegui enviar a notificação macOS.[/yellow]")
     if not dry_run:
         # dry-run não avança o checkpoint de --since-last-run nem grava no
         # histórico de runs -- é só uma pré-visualização.
@@ -460,15 +547,17 @@ def enrich_board(
             )
             if has_substance and not board.has_enrichment_section(card["page_id"]):
                 board.append_enrichment_section(card["page_id"], enrichment)
-            # Atualiza o mapeamento local para manter o dedupe consistente
-            fingerprint = f"{company.lower().strip()}::{(card['role'] or 'unknown').lower().strip()}"
-            state_db.upsert_proposal(
-                fingerprint=fingerprint,
-                notion_page_id=card["page_id"],
-                company_client=company,
-                agency=card["agency"],
-                role_title=card["role"],
-            )
+            # Mantém o mapeamento local coerente com a empresa (agora conhecida),
+            # sem criar uma linha nova: o fingerprint existente é o da página.
+            fingerprint = state_db.get_fingerprint_by_page(card["page_id"])
+            if fingerprint:
+                state_db.upsert_proposal(
+                    fingerprint=fingerprint,
+                    notion_page_id=card["page_id"],
+                    company_client=company,
+                    agency=card["agency"],
+                    role_title=card["role"],
+                )
         enriched += 1
 
     console.print(
@@ -500,6 +589,231 @@ def recruiters() -> None:
             (row["last_contact"] or "")[:10],
         )
     console.print(table)
+
+
+@app.command()
+def stats() -> None:
+    """Auditoria das decisões: ações, taxa de ignore por fonte, Jev vs LLM, guardrails."""
+    rows = StateDB().list_assessments()
+    if not rows:
+        console.print("[yellow]Ainda sem avaliações registadas (só runs novos gravam).[/yellow]")
+        return
+    total = len(rows)
+    with_action = [r for r in rows if r["action"]]
+    console.print(f"[bold]{total} avaliações[/bold] ({len(with_action)} com ação recomendada)")
+
+    actions = Counter(r["action"] for r in with_action)
+    table = Table(title="Ações recomendadas")
+    table.add_column("Ação")
+    table.add_column("Nº", justify="right")
+    table.add_column("%", justify="right")
+    for action, n in actions.most_common():
+        table.add_row(f"{triage(action)} ({action})", str(n), f"{100 * n / len(with_action):.0f}%")
+    console.print(table)
+
+    by_source: dict[str, Counter] = {}
+    for r in with_action:
+        by_source.setdefault(r["source"] or "?", Counter())[r["action"]] += 1
+    table = Table(title="Taxa de ignore por fonte")
+    table.add_column("Fonte")
+    table.add_column("Nº", justify="right")
+    table.add_column("Ignore", justify="right")
+    table.add_column("Info média em falta", justify="right")
+    for source, counter in by_source.items():
+        n = sum(counter.values())
+        missing = [r["missing_count"] for r in with_action if (r["source"] or "?") == source and r["missing_count"] is not None]
+        table.add_row(
+            source,
+            str(n),
+            f"{100 * counter['ignore'] / n:.0f}%",
+            f"{sum(missing) / len(missing):.1f}/8" if missing else "—",
+        )
+    console.print(table)
+
+    sources = Counter(r["action_source"] or "llm" for r in with_action)
+    jev_changes = sum(1 for r in with_action if "jev:" in (r["decision_trace"] or ""))
+    guardrail = sum(1 for r in with_action if "guardrail:" in (r["decision_trace"] or ""))
+    console.print(
+        "Origem da decisão final: "
+        + ", ".join(f"{k} {v}" for k, v in sources.most_common())
+        + f"\nJev alterou a ação do LLM em {jev_changes} casos; guardrails corrigiram {guardrail}."
+    )
+    unknown_fit = sum(1 for r in with_action if r["fit_score"] is None)
+    console.print(f"Sem fit calculável (info insuficiente): {unknown_fit}/{len(with_action)}")
+
+
+@app.command()
+def followups(
+    days: int = typer.Option(7, help="Dias sem atividade para contar como parado"),
+    new_days: int = typer.Option(2, help="Dias para uma proposta 'Responder' ainda em 'Nova'"),
+) -> None:
+    """Cards parados: à espera de resposta há muito tempo, ou boas propostas por tocar."""
+    Config.validate()
+    board = NotionBoard()
+    now = datetime.now(timezone.utc)
+    waiting_states = {"Respondida", "Recruiter screen", "Entrevista", "Proposta"}
+    rows = []
+    for card in board.list_cards():
+        if card.get("archived") or not card.get("last_edited"):
+            continue
+        age = (now - datetime.fromisoformat(card["last_edited"].replace("Z", "+00:00"))).days
+        estado = card.get("estado")
+        label = card["company"] or "Confidencial"
+        if estado in waiting_states and age >= days:
+            rows.append((age, label, card["role"] or "—", f"{estado} parado há {age}d", card.get("url") or ""))
+        elif (
+            estado in (None, "Nova")
+            and (card.get("triagem") or "").startswith("🟢")
+            and age >= new_days
+        ):
+            rows.append((age, label, card["role"] or "—", f"boa proposta por tocar há {age}d", card.get("url") or ""))
+    if not rows:
+        console.print("[green]Nada parado.[/green]")
+        return
+    table = Table(title="Follow-ups")
+    for col in ("Empresa", "Role", "Porquê", "Link"):
+        table.add_column(col)
+    for _, label, role, why, url in sorted(rows, reverse=True):
+        table.add_row(label, role, why, url)
+    console.print(table)
+
+
+@app.command()
+def learn() -> None:
+    """Cruza as tuas decisões no Notion (estado + motivo) com o que o pipeline previu."""
+    Config.validate()
+    report = analyze_feedback(NotionBoard().list_cards())
+    console.print(
+        f"{report['advanced']} avançaram (fit médio {report['avg_fit_advanced']}), "
+        f"{report['rejected']} rejeitadas/arquivadas (fit médio {report['avg_fit_rejected']})."
+    )
+    if report["rejected_without_reason"]:
+        console.print(
+            f"[yellow]{report['rejected_without_reason']} rejeitadas sem 'Motivo' -- "
+            "preenche o campo para o pipeline aprender.[/yellow]"
+        )
+    if report["reasons"]:
+        table = Table(title="Motivos de rejeição")
+        table.add_column("Motivo")
+        table.add_column("Nº", justify="right")
+        for reason, n in report["reasons"].most_common():
+            table.add_row(reason, str(n))
+        console.print(table)
+        top, n = report["reasons"].most_common(1)[0]
+        if n >= 3:
+            console.print(
+                f"[cyan]Sugestão:[/cyan] '{top}' domina ({n}x) -- torna isso um dealbreaker explícito "
+                "na secção '## Regras' do profile.md."
+            )
+    if report["optimistic"]:
+        console.print(
+            f"[yellow]{len(report['optimistic'])} propostas recomendadas 'Responder' foram rejeitadas "
+            "-- o perfil está demasiado otimista nesses casos.[/yellow]"
+        )
+    if report["pessimistic"]:
+        console.print(
+            f"[yellow]{len(report['pessimistic'])} propostas marcadas 'Descartar' acabaram a avançar "
+            "-- os descartes estão demasiado agressivos.[/yellow]"
+        )
+
+
+@app.command()
+def reconcile(
+    fix: bool = typer.Option(False, "--fix", help="Aplica as correções à state.db"),
+) -> None:
+    """Compara a state.db com os cards reais do Notion (órfãos e mapeamentos mortos)."""
+    Config.validate()
+    board = NotionBoard()
+    state_db = board.db
+    cards = {c["page_id"]: c for c in board.list_cards() if not c.get("archived")}
+    proposals = state_db.list_proposals()
+    mapped = {p["notion_page_id"] for p in proposals}
+
+    stale = [p for p in proposals if p["notion_page_id"] not in cards]
+    orphans = [c for pid, c in cards.items() if pid not in mapped]
+    console.print(
+        f"{len(cards)} cards no Notion, {len(proposals)} linhas na state.db: "
+        f"[red]{len(stale)} mapeamentos mortos[/red], [yellow]{len(orphans)} cards sem mapeamento[/yellow]."
+    )
+    for p in stale:
+        console.print(f"  mapeamento morto: {p['company_client'] or p['agency']} — {p['role_title']}")
+    for c in orphans:
+        console.print(f"  card órfão: {c['company']} — {c['role']} ({c.get('url')})")
+    if not fix:
+        if stale or orphans:
+            console.print("Corre com [bold]--fix[/bold] para corrigir (faz backup antes).")
+        return
+    _backup_state(state_db)
+    for p in stale:
+        state_db.delete_proposal(p["fingerprint"])
+    for c in orphans:
+        company = (c["company"] or "").strip()
+        fingerprint = f"{company.lower()}::{(c['role'] or 'unknown').lower()}::reconciled::{c['page_id'][:8]}"
+        state_db.upsert_proposal(
+            fingerprint=fingerprint,
+            notion_page_id=c["page_id"],
+            company_client=None if company.lower() == "confidencial" else company,
+            agency=c["agency"],
+            role_title=c["role"],
+        )
+    console.print(f"[green]{len(stale)} removidos, {len(orphans)} registados.[/green]")
+
+
+@app.command()
+def dedupe(
+    apply: bool = typer.Option(
+        False, "--apply", help="Arquiva os cards duplicados no Notion e junta as linhas locais"
+    ),
+) -> None:
+    """Encontra propostas duplicadas já existentes (mantém a mais antiga de cada grupo)."""
+    state_db = StateDB()
+    groups = state_db.find_duplicate_groups()
+    if not groups:
+        console.print("[green]Sem duplicados prováveis.[/green]")
+        return
+    for group in groups:
+        keep, *drops = group
+        console.print(
+            f"[bold]{keep['company_client'] or keep['agency'] or 'Confidencial'} — {keep['role_title']}[/bold]"
+        )
+        console.print(f"  manter: {keep['location'] or '—'} ({keep['notion_page_id']})")
+        for d in drops:
+            console.print(f"  [red]duplicado:[/red] {d['location'] or '—'} ({d['notion_page_id']})")
+    total = sum(len(g) - 1 for g in groups)
+    if not apply:
+        console.print(f"\n{total} duplicados em {len(groups)} grupos. Corre com [bold]--apply[/bold] para os arquivar.")
+        return
+    Config.validate()
+    if not typer.confirm(f"Arquivar {total} cards no Notion (recuperáveis no lixo) e juntar na state.db?"):
+        raise typer.Exit(0)
+    _backup_state(state_db)
+    board = NotionBoard(db=state_db)
+    for group in groups:
+        keep, *drops = group
+        for d in drops:
+            try:
+                board.archive_page(d["notion_page_id"])
+            except Exception as exc:
+                console.print(f"  [red]Falha a arquivar {d['notion_page_id']}: {exc}[/red]")
+                continue
+            state_db.merge_proposals(keep["fingerprint"], d["fingerprint"])
+    console.print("[green]Duplicados arquivados e juntados.[/green]")
+
+
+@app.command()
+def maintenance() -> None:
+    """Backup + limpeza de lixo histórico (dry-runs gravados, alertas como recruiters)."""
+    state_db = StateDB()
+    _backup_state(state_db)
+    result = state_db.cleanup_invalid_state(user_name=Config.user_name or None)
+    console.print(
+        f"[green]Removidos: {result['dry_run_emails']} emails 'proposal_dry_run', "
+        f"{result['invalid_recruiters']} recruiters inválidos.[/green]"
+    )
+    if not Config.user_name:
+        console.print(
+            "[dim]Define USER_NAME no .env para também excluir o teu nome da tabela de recruiters.[/dim]"
+        )
 
 
 def _print_summary(

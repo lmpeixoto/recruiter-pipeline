@@ -13,6 +13,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 from recruiter_pipeline.config import Config
+from recruiter_pipeline.job_alerts import JOB_LINK_RE, extract_job_id
 from recruiter_pipeline.models import RecruiterMessage
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
@@ -342,6 +343,13 @@ class GmailClient:
         sender_name, sender_headline = _extract_sender_info(body_text, subject)
         permalink = _extract_permalink(html_body)
         company_linkedin_guess = _extract_company_linkedin(html_body)
+        email_type = classify_email_type(subject, from_email)
+        # Alertas listam várias vagas (job_alerts.split_job_alert); numa DM, um
+        # link de vaga identifica a oportunidade.
+        job_id = None
+        if email_type != "job_alert":
+            match = JOB_LINK_RE.search(html_body or body_text)
+            job_id = extract_job_id(permalink) or (match.group(1) if match else None)
 
         return RecruiterMessage(
             message_id=message_id,
@@ -353,6 +361,7 @@ class GmailClient:
             body_html=html_body or None,
             received_at=received_at,
             permalink=permalink,
-            email_type=classify_email_type(subject, from_email),
+            email_type=email_type,
             company_linkedin_guess=company_linkedin_guess,
+            job_id=job_id,
         )

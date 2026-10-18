@@ -149,6 +149,40 @@ Sem `profile.md`, o pipeline corre normalmente mas sem avaliação (Fit fica vaz
 
 Cada card fica com propriedades decisórias no topo: **Decisão** (tipo, fit, ação recomendada), **Informação em falta** + perguntas, depois resumo e mensagem original no fundo.
 
+#### Como a decisão é protegida
+
+- **`ignore` precisa de evidência.** Só sobrevive com um dealbreaker explícito (secção `## Regras` do `profile.md`) ou fit < 40 com confiança ≥ 60 e vaga identificada. Falta de informação vira **Pedir info** ou **Monitorizar**, nunca descarte.
+- **Triagem** (propriedade ordenável no Notion): 🟢 Responder · 🟡 Pedir info · ⚪ Monitorizar · 🔴 Descartar. Fit com confiança < 50 aparece como *provisório*.
+- **Rascunho de resposta** no card para *responder* / *candidatar* / *pedir info*.
+- **"Minhas notas"** no fim de cada card: o pipeline nunca lhe toca em updates (só reescreve o conteúdo gerado acima).
+- O rasto de debug (o que o Jev ou os guardrails alteraram) vai para a tabela `assessments` da `state.db`, não para o card.
+
+### Job alerts
+
+Um email de job alert lista várias vagas: o pipeline divide-o em **uma proposta por vaga** (sem gastar classificação) e usa o id da vaga do LinkedIn como chave de dedupe. Com `--fetch-job-details` vai buscar a descrição completa (pedido público ao LinkedIn, 1 s entre pedidos, falha em silêncio).
+
+### Fluxo de trabalho
+
+```bash
+uv run -m recruiter_pipeline.main run --since-last-run --notify   # resumo + notificação macOS
+uv run -m recruiter_pipeline.main run --review                    # confirma cada card antes de criar
+uv run -m recruiter_pipeline.main followups                       # cards parados / boas propostas por tocar
+uv run -m recruiter_pipeline.main learn                           # as tuas decisões vs o que foi previsto
+uv run -m recruiter_pipeline.main stats                           # ações, ignore por fonte, Jev vs LLM, guardrails
+```
+
+Preenche **Motivo** (select) ao rejeitar/arquivar um card: `learn` agrega-os e sugere regras para o `profile.md`.
+
+### Manutenção
+
+```bash
+uv run -m recruiter_pipeline.main maintenance        # backup + limpa dry-runs gravados e "recruiters" falsos
+uv run -m recruiter_pipeline.main dedupe             # lista duplicados; --apply arquiva-os no Notion
+uv run -m recruiter_pipeline.main reconcile          # state.db vs Notion; --fix corrige órfãos/mapeamentos mortos
+```
+
+Todas as operações que alteram a `state.db` em bloco (e cada `run` real) fazem antes um backup `state.db.bak-<data>` (guarda os 10 mais recentes).
+
 ### Estatísticas de recruiters
 
 O pipeline regista cada recruiter que contacta. Para ver:

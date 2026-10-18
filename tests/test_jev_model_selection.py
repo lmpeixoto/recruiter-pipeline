@@ -121,9 +121,11 @@ class TestAssessorJev:
         assert result.recommended_action == "apply"
         # Campos de texto/score vêm do LLM, intocados pelo Jev.
         assert result.fit_score == 80
-        # Jev mudou monitor->apply: a nota do override fica à frente do
-        # action_reason original, para não contradizer silenciosamente.
-        assert result.action_reason == "[Jev mudou a ação de 'monitor' para 'apply'] bom fit"
+        # Jev mudou monitor->apply: o action_reason fica limpo (é o que o
+        # card mostra); o rasto do override vai para decision_trace (DB).
+        assert result.action_reason == "bom fit"
+        assert result.action_source == "jev"
+        assert "jev: monitor → apply" in result.decision_trace
         assert len(jev.calls) == 1
 
     def test_jev_same_action_leaves_reason_unchanged(self):
@@ -204,4 +206,6 @@ class TestAssessorJev:
 def _extraction():
     from recruiter_pipeline.models import ProposalExtraction
 
-    return ProposalExtraction(company_client="Acme", summary="s", confidence=0.9)
+    return ProposalExtraction(
+        company_client="Acme", role_title="SRE", summary="s", confidence=0.9
+    )

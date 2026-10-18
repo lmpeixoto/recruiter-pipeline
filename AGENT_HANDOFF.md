@@ -95,6 +95,18 @@ Flags úteis do `run`: `--skip-assessment`, `--skip-enrichment`, `--include-job-
 - `TAVILY_API_KEY` é placeholder → enrichment web limitado a hints das mensagens até obter chave real.
 - launchd corre `run --since-last-run` às 9h e 19h.
 
+## Atualização (branch feat/decision-quality-and-dedupe)
+
+- `decision.py`: guardrails determinísticos (`ignore` precisa de evidência; `reply/apply` precisam de empresa+role) e `## Regras` do profile.md (`avoid_stack/companies/agencies`). Triagem 🟢🟡⚪🔴.
+- `OpportunityAssessment`: + `reply_draft`, `action_source`, `decision_trace`, `jev_confidence`. O rasto do Jev já NÃO vai para `action_reason`/card.
+- `state.db`: nova tabela `assessments` (auditoria por mensagem); `proposals` + `job_id`, `recruiter_name`.
+- Dedupe em 4 camadas em `StateDB.find_proposal`: job_id → fingerprint → fuzzy cliente-OU-agência (localização tolerante, `locations_compatible`) → recruiter+role quando a empresa é desconhecida.
+- `job_alerts.py`: um alerta → uma mensagem por vaga (`<msg_id>#job<id>`); `--fetch-job-details` opcional.
+- Notion: `Triagem` e `Motivo`; card com âncora 🤖 + secção "Minhas notas" preservada em updates (`_refresh_page_content`).
+- Comandos novos: `stats`, `followups`, `learn`, `reconcile`, `dedupe`, `maintenance`; `run --review/--notify/--fetch-job-details`; backup automático da state.db.
+- `enrich-board` deixou de criar linhas de proposals com fingerprint de formato errado.
+- Testes: `tests/conftest.py` neutraliza `JEV_MODEL` do `.env` (antes um teste chamava o Jev a sério).
+
 ## Trabalho futuro (não implementado)
 
 Ligado ao feedback-loop: o campo **Feedback** + estados do Kanban começam a capturar decisões do utilizador. Próximos passos por prioridade:

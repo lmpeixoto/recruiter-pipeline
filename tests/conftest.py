@@ -2,7 +2,16 @@
 
 from datetime import UTC, datetime
 
+import pytest
+
+from recruiter_pipeline.config import Config
 from recruiter_pipeline.models import RecruiterMessage
+
+
+@pytest.fixture(autouse=True)
+def _isolate_from_local_env(monkeypatch):
+    """Os testes não podem depender do .env real (ex.: JEV_MODEL ligava o Jev a sério)."""
+    monkeypatch.setattr(Config, "jev_model", "")
 
 
 def make_message(
