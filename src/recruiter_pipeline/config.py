@@ -24,6 +24,12 @@ class Config:
     openrouter_model: str = os.getenv(
         "OPENROUTER_MODEL", "openai/gpt-4o-mini"
     )
+    # Modelo opcional para os passos de decisão tipada (Classifier, Assessor) --
+    # ex. "typesafe/jev-1.14" via OpenRouter. Vazio por omissão: esses passos
+    # continuam a usar openrouter_model como qualquer outro. A extração
+    # (Extractor) nunca usa este modelo -- tem campos de texto livre
+    # (nomes, resumo) que um modelo de decisão tipada não é feito para gerar.
+    jev_model: str = os.getenv("JEV_MODEL", "")
 
     notion_token: str = os.getenv("NOTION_TOKEN", "")
     notion_parent_page_id: str = os.getenv("NOTION_PARENT_PAGE_ID", "")

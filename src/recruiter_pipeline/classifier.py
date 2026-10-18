@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from recruiter_pipeline.config import Config
 from recruiter_pipeline.llm import LLMClient
 from recruiter_pipeline.models import Classification, LinkedInMessage
 
@@ -12,7 +13,10 @@ class Classifier:
     """Classifica uma mensagem do LinkedIn."""
 
     def __init__(self, llm: LLMClient | None = None) -> None:
-        self.llm = llm or LLMClient()
+        # is_opportunity + confidence é exatamente uma decisão tipada --
+        # usa JEV_MODEL quando definido (ex. "typesafe/jev-1.14"), senão
+        # cai no modelo generativo normal (Config.openrouter_model).
+        self.llm = llm or LLMClient(model=Config.jev_model or None)
         self.system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
 
     def classify(self, message: LinkedInMessage) -> Classification:

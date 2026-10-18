@@ -74,6 +74,13 @@ OPENROUTER_API_KEY=sk-or-v1-...
 # Modelo sugerido: openai/gpt-4o-mini (barato, bom structured output)
 # Vê outros em https://openrouter.ai/models
 OPENROUTER_MODEL=openai/gpt-4o-mini
+# Opcional: modelo separado só para Classifier e Assessor -- ambos são
+# decisões tipadas (bool/scores/ação de conjunto fechado), candidatos
+# naturais a um "System One" model como o typesafe/jev-1.14 (via
+# OpenRouter). O Extractor nunca usa isto -- tem campos de texto livre
+# (nomes, resumo) que esse tipo de modelo não gera. Vazio = usa
+# OPENROUTER_MODEL como os outros passos, sem mudança de comportamento.
+JEV_MODEL=
 NOTION_TOKEN=secret_...
 NOTION_PARENT_PAGE_ID=...
 TAVILY_API_KEY=tvly-...
