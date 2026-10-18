@@ -2,7 +2,7 @@
 
 import base64
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
@@ -13,7 +13,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 from recruiter_pipeline.config import Config
-from recruiter_pipeline.models import LinkedInMessage
+from recruiter_pipeline.models import RecruiterMessage
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 LINKEDIN_SENDERS = [
@@ -253,7 +253,7 @@ class GmailClient:
         label: str | None = None,
         max_results: int | None = None,
         unread_only: bool = False,
-    ) -> list[LinkedInMessage]:
+    ) -> list[RecruiterMessage]:
         """Busca e parseia emails de notificação do LinkedIn."""
         query = self.build_query(since, until, label)
         if unread_only:
@@ -274,7 +274,7 @@ class GmailClient:
                 messages = messages[:max_results]
                 break
 
-        parsed: list[LinkedInMessage] = []
+        parsed: list[RecruiterMessage] = []
         for msg_meta in messages:
             msg = (
                 self.service.users()
@@ -296,8 +296,8 @@ class GmailClient:
             body={"removeLabelIds": ["UNREAD"]},
         ).execute()
 
-    def _parse_message(self, msg: dict) -> LinkedInMessage | None:
-        """Parseia um email da Gmail API para LinkedInMessage."""
+    def _parse_message(self, msg: dict) -> RecruiterMessage | None:
+        """Parseia um email da Gmail API para RecruiterMessage."""
         payload = msg.get("payload", {})
         headers = {h["name"].lower(): h["value"] for h in payload.get("headers", [])}
 
@@ -309,9 +309,9 @@ class GmailClient:
         try:
             received_at = parsedate_to_datetime(date_header)
             if received_at.tzinfo is None:
-                received_at = received_at.replace(tzinfo=timezone.utc)
+                received_at = received_at.replace(tzinfo=UTC)
         except Exception:
-            received_at = datetime.now(timezone.utc)
+            received_at = datetime.now(UTC)
 
         # Extrai partes HTML e plain text
         html_body = ""
@@ -343,7 +343,7 @@ class GmailClient:
         permalink = _extract_permalink(html_body)
         company_linkedin_guess = _extract_company_linkedin(html_body)
 
-        return LinkedInMessage(
+        return RecruiterMessage(
             message_id=message_id,
             thread_id=msg.get("threadId"),
             sender_name=sender_name,

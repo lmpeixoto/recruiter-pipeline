@@ -1,13 +1,19 @@
 """Modelos Pydantic usados no pipeline."""
 
 from datetime import datetime
-from typing import Any
 
 from pydantic import BaseModel, Field
 
 
-class LinkedInMessage(BaseModel):
-    """Email de notificação do LinkedIn parseado."""
+class RecruiterMessage(BaseModel):
+    """Uma mensagem de recruiter normalizada, seja qual for a origem.
+
+    Hoje só o GmailClient (notificações do LinkedIn) produz isto -- os
+    campos LinkedIn-específicos (sender_headline, company_linkedin_guess)
+    ficam None para qualquer fonte futura que não os tenha. O resto do
+    pipeline (Classifier/Extractor/Assessor/NotionBoard) já é agnóstico
+    de fonte; só esta classe e o GmailClient ainda não são.
+    """
 
     message_id: str
     thread_id: str | None = None
@@ -243,7 +249,7 @@ def opportunities_match(
 class Proposal(BaseModel):
     """Proposta processada, pronta a enviar para o Notion."""
 
-    message: LinkedInMessage
+    message: RecruiterMessage
     classification: Classification
     extraction: ProposalExtraction
     enrichment: CompanyEnrichment | None = None

@@ -1,7 +1,6 @@
 """Integração com Notion: criação de database e upsert de cards."""
 
 import time
-from datetime import datetime
 
 import httpx
 from notion_client import Client
@@ -10,9 +9,9 @@ from recruiter_pipeline.config import Config
 from recruiter_pipeline.db import StateDB
 from recruiter_pipeline.models import (
     CompanyEnrichment,
-    LinkedInMessage,
     OpportunityAssessment,
     ProposalExtraction,
+    RecruiterMessage,
     missing_information,
 )
 
@@ -188,7 +187,7 @@ class NotionBoard:
         self,
         fingerprint: str,
         extraction: ProposalExtraction,
-        message: LinkedInMessage,
+        message: RecruiterMessage,
         enrichment: CompanyEnrichment | None,
         assessment: OpportunityAssessment | None = None,
     ) -> str:
@@ -411,7 +410,7 @@ class NotionBoard:
     def _build_properties(
         self,
         extraction: ProposalExtraction,
-        message: LinkedInMessage,
+        message: RecruiterMessage,
         enrichment: CompanyEnrichment | None,
         assessment: OpportunityAssessment | None = None,
     ) -> dict:
@@ -493,7 +492,7 @@ class NotionBoard:
 
     def _build_page_content(
         self,
-        message: LinkedInMessage,
+        message: RecruiterMessage,
         extraction: ProposalExtraction,
         enrichment: CompanyEnrichment | None,
         assessment: OpportunityAssessment | None = None,
